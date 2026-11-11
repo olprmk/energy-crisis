@@ -1,0 +1,418 @@
+{
+  "units": "metres, Blender Z-up (glTF: x, z->y, y->-z)",
+  "floor": 2,
+  "size": [
+    11,
+    8
+  ],
+  "wall_height": 2.2,
+  "inner_wall_height": 0.9,
+  "rooms": [
+    {
+      "id": "kitchen",
+      "label_uk": "Кухня",
+      "rect": [
+        0.0,
+        0.0,
+        4.5,
+        4.0
+      ],
+      "wall_color": "#F0CB8C"
+    },
+    {
+      "id": "living",
+      "label_uk": "Вітальня",
+      "rect": [
+        4.5,
+        0.0,
+        11.0,
+        4.0
+      ],
+      "wall_color": "#8FB8C9"
+    },
+    {
+      "id": "kids",
+      "label_uk": "Дитяча",
+      "rect": [
+        0.0,
+        4.0,
+        4.0,
+        8.0
+      ],
+      "wall_color": "#C9A9DB"
+    },
+    {
+      "id": "bath",
+      "label_uk": "Ванна",
+      "rect": [
+        4.0,
+        4.0,
+        7.2,
+        8.0
+      ],
+      "wall_color": "#9FD8C6"
+    },
+    {
+      "id": "bedroom",
+      "label_uk": "Спальня",
+      "rect": [
+        7.2,
+        4.0,
+        11.0,
+        8.0
+      ],
+      "wall_color": "#E7AFA6"
+    }
+  ],
+  "doors": [
+    {
+      "axis": "x",
+      "at": 4.5,
+      "centre": 1.75,
+      "width": 0.95,
+      "height": 1.6,
+      "connects": [
+        "kitchen",
+        "living"
+      ]
+    },
+    {
+      "axis": "y",
+      "at": 4.0,
+      "centre": 0.85,
+      "width": 0.95,
+      "height": 1.6,
+      "connects": [
+        "kitchen",
+        "kids"
+      ]
+    },
+    {
+      "axis": "y",
+      "at": 4.0,
+      "centre": 5.3,
+      "width": 0.95,
+      "height": 1.6,
+      "connects": [
+        "living",
+        "bath"
+      ]
+    },
+    {
+      "axis": "y",
+      "at": 4.0,
+      "centre": 10.25,
+      "width": 0.95,
+      "height": 1.6,
+      "connects": [
+        "living",
+        "bedroom"
+      ]
+    }
+  ],
+  "appliances": [
+    {
+      "id": "stove",
+      "label_uk": "Плита з духовкою",
+      "room": "kitchen",
+      "power_w": 2500,
+      "min_floor": 4,
+      "never_off": false,
+      "pos": [
+        1.75,
+        3.62,
+        0
+      ],
+      "interact_point": [
+        1.75,
+        2.97
+      ]
+    },
+    {
+      "id": "kettle",
+      "label_uk": "Чайник",
+      "room": "kitchen",
+      "power_w": 2000,
+      "min_floor": 1,
+      "never_off": false,
+      "pos": [
+        2.4,
+        3.6,
+        0.78
+      ],
+      "interact_point": [
+        2.4,
+        2.95
+      ]
+    },
+    {
+      "id": "microwave",
+      "label_uk": "Мікрохвильовка",
+      "room": "kitchen",
+      "power_w": 1200,
+      "min_floor": 2,
+      "never_off": false,
+      "pos": [
+        3.3,
+        3.65,
+        0.78
+      ],
+      "interact_point": [
+        3.3,
+        3.0
+      ]
+    },
+    {
+      "id": "fridge",
+      "label_uk": "Холодильник",
+      "room": "kitchen",
+      "power_w": 150,
+      "min_floor": 1,
+      "never_off": true,
+      "pos": [
+        4.05,
+        3.6,
+        0
+      ],
+      "interact_point": [
+        4.05,
+        2.95
+      ]
+    },
+    {
+      "id": "tv",
+      "label_uk": "Телевізор",
+      "room": "living",
+      "power_w": 150,
+      "min_floor": 1,
+      "never_off": false,
+      "pos": [
+        7.9,
+        0.55,
+        0.4
+      ],
+      "interact_point": [
+        7.9,
+        1.2
+      ]
+    },
+    {
+      "id": "console",
+      "label_uk": "Ігрова приставка",
+      "room": "living",
+      "power_w": 200,
+      "min_floor": 3,
+      "never_off": false,
+      "pos": [
+        7.45,
+        0.6,
+        0.4
+      ],
+      "interact_point": [
+        7.45,
+        1.25
+      ]
+    },
+    {
+      "id": "floor_lamp",
+      "label_uk": "Торшер",
+      "room": "living",
+      "power_w": 100,
+      "min_floor": 1,
+      "never_off": false,
+      "pos": [
+        6.45,
+        3.55,
+        0
+      ],
+      "interact_point": [
+        6.45,
+        2.9
+      ]
+    },
+    {
+      "id": "heater",
+      "label_uk": "Обігрівач",
+      "room": "living",
+      "power_w": 2000,
+      "min_floor": 4,
+      "never_off": false,
+      "pos": [
+        4.85,
+        2.6,
+        0
+      ],
+      "interact_point": [
+        5.5,
+        2.6
+      ]
+    },
+    {
+      "id": "computer",
+      "label_uk": "Комп'ютер",
+      "room": "kids",
+      "power_w": 300,
+      "min_floor": 1,
+      "never_off": false,
+      "pos": [
+        1.0,
+        7.65,
+        0.55
+      ],
+      "interact_point": [
+        1.0,
+        7.0
+      ]
+    },
+    {
+      "id": "desk_lamp",
+      "label_uk": "Лампа на столі",
+      "room": "kids",
+      "power_w": 40,
+      "min_floor": 1,
+      "never_off": false,
+      "pos": [
+        1.5,
+        7.7,
+        0.55
+      ],
+      "interact_point": [
+        1.5,
+        7.05
+      ]
+    },
+    {
+      "id": "nightlight",
+      "label_uk": "Нічник",
+      "room": "kids",
+      "power_w": 10,
+      "min_floor": 2,
+      "never_off": false,
+      "pos": [
+        2.75,
+        7.75,
+        0.0
+      ],
+      "interact_point": [
+        2.75,
+        7.1
+      ]
+    },
+    {
+      "id": "mirror_light",
+      "label_uk": "Світло над дзеркалом",
+      "room": "bath",
+      "power_w": 60,
+      "min_floor": 1,
+      "never_off": false,
+      "pos": [
+        4.55,
+        7.9,
+        0
+      ],
+      "interact_point": [
+        4.55,
+        7.25
+      ]
+    },
+    {
+      "id": "hair_dryer",
+      "label_uk": "Фен",
+      "room": "bath",
+      "power_w": 1800,
+      "min_floor": 3,
+      "never_off": false,
+      "pos": [
+        4.3,
+        6.0,
+        0.73
+      ],
+      "interact_point": [
+        4.95,
+        6.0
+      ]
+    },
+    {
+      "id": "washer",
+      "label_uk": "Пральна машина",
+      "room": "bath",
+      "power_w": 2200,
+      "min_floor": 4,
+      "never_off": false,
+      "pos": [
+        6.75,
+        4.55,
+        0
+      ],
+      "interact_point": [
+        6.75,
+        5.2
+      ]
+    },
+    {
+      "id": "boiler",
+      "label_uk": "Бойлер",
+      "room": "bath",
+      "power_w": 2000,
+      "min_floor": 5,
+      "never_off": false,
+      "pos": [
+        6.95,
+        7.75,
+        0
+      ],
+      "interact_point": [
+        6.95,
+        7.1
+      ]
+    },
+    {
+      "id": "bed_lamp",
+      "label_uk": "Настільна лампа",
+      "room": "bedroom",
+      "power_w": 60,
+      "min_floor": 1,
+      "never_off": false,
+      "pos": [
+        10.15,
+        7.65,
+        0.45
+      ],
+      "interact_point": [
+        10.15,
+        7.0
+      ]
+    },
+    {
+      "id": "iron",
+      "label_uk": "Праска",
+      "room": "bedroom",
+      "power_w": 1500,
+      "min_floor": 2,
+      "never_off": false,
+      "pos": [
+        8.6,
+        4.75,
+        0
+      ],
+      "interact_point": [
+        8.6,
+        4.1
+      ]
+    }
+  ],
+  "lift": {
+    "pos": [
+      0.0,
+      0.9
+    ],
+    "door_front": [
+      0.7,
+      0.9
+    ]
+  },
+  "spawn": [
+    1.0,
+    1.0
+  ]
+}

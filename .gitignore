@@ -1,0 +1,6 @@
+# Godot cache (rebuilt when the project is opened)
+.godot/
+# export output
+build/
+# macOS
+.DS_Store
