@@ -125,7 +125,7 @@ const APPLIANCE_UNLOCK := {
 ## sneakers), "step_phases" = moments of the walk animation (0..1) when a foot touches the floor (taken from the
 ## animations: people step at 13% and 59% of the cycle; the dog's front and back paws land in pairs),
 ## "step_gains" = extra dB per step (the dog's back paws are softer). The floor of the room decides wood or tile.
-const STEP_VOLUME_DB := -2.0
+const STEP_VOLUME_DB := -5.1   # -2 dB minus 30 % (x0.7 = -3.1 dB)
 const CHARACTERS := [
 	{"id": "mother", "name": "Джоан", "role": "Мати", "file": "res://assets/models/characters/mother.glb",
 	 "speed": 3.0, "switch_time": 0.6, "radius": 0.22, "steps": "barefoot", "step_phases": [0.13, 0.59],

@@ -46,6 +46,7 @@ var player_name := ""
 var run_passed_wh := 0.0   # energy saved on floors already passed in this run
 var result_win := false
 var _floor_sub := ""     # countdown subtitle: floor number + newly unlocked appliances
+var _char_scenes: Array = []   # the four characters' models, loaded once: switching characters must not reload them
 var _switch_target: Appliance
 
 # --- automated test mode (godot -- --autotest) -----------------------------
@@ -83,10 +84,12 @@ func _ready() -> void:
 			var r := a.substr(9).split("-")
 			_floor_from = int(r[0]) - 1
 			_floor_to = int(r[r.size() - 1])
+	Lang.detect()   # Ukrainian in Ukraine, English elsewhere (lang.gd)
 	_setup_window()
 	_setup_input()
 	_setup_world()
 
+	add_child(preload("res://scripts/perf.gd").new())   # 3D resolution in the browser, F3 meter
 	sfx = Sfx.new()
 	add_child(sfx)
 	steps = preload("res://scripts/footsteps.gd").new()
@@ -119,6 +122,10 @@ func _ready() -> void:
 			demo = true
 	save = preload("res://scripts/save_data.gd").new("user://save_demo.json" if demo else "user://save.json")
 	player_name = save.last_name
+	for c in GameConfig.CHARACTERS:
+		_char_scenes.append(load(c["file"]))
+	if not demo:
+		await _warm_up()
 	enter_name()
 	for arg in args:
 		if arg.begins_with("--select-shots="):
@@ -146,6 +153,9 @@ func _ready() -> void:
 # ------------------------------------------------------------------ setup
 func _setup_window() -> void:
 	## 1280x720 logical; on Retina/HiDPI make the window 1280 *points* wide instead of 1280 physical pixels.
+	# the window's title (on the web the page's) in the game's language; deferred: the engine sets the project's
+	# name after the main scene's _ready
+	DisplayServer.window_set_title.call_deferred(Lang.t("Енергетична криза"))
 	var win := get_window()
 	if OS.has_feature("mobile") or OS.get_cmdline_args().has("--resolution") or win.size.y > win.size.x:
 		return   # phones / an explicit size / a portrait window: keep it as it is (layout.gd adapts to it)
@@ -179,7 +189,7 @@ func _setup_input() -> void:
 		"interact": [KEY_SPACE, KEY_E], "confirm": [KEY_ENTER, KEY_KP_ENTER],
 		"restart": [KEY_R], "back": [KEY_ESCAPE],
 		"zoom_in": [KEY_EQUAL, KEY_KP_ADD], "zoom_out": [KEY_MINUS, KEY_KP_SUBTRACT],
-		"music": [KEY_M],
+		"music": [KEY_M], "language": [KEY_L],
 	}
 	for action in map:
 		if not InputMap.has_action(action):
@@ -304,6 +314,8 @@ func _build_apartment(m: String) -> Dictionary:
 		var path := tex.resource_path.get_file() if tex else ""
 		surfaces[r["id"]] = "tile" if path.contains("tile") or path.contains("kitchen") or path.contains("bath") else "wood"
 	ap["surfaces"] = surfaces
+	if not OS.get_cmdline_user_args().has("--no-merge") and not _og_shot():
+		_merge_static(lvl)
 	return ap
 
 
@@ -458,6 +470,120 @@ func _setup_lift_display(ap: Dictionary) -> Label3D:
 	return lb
 
 
+func _warm_up() -> void:
+	## A browser compiles every shader the first time it is drawn, and the game stops for a moment while it
+	## does: the first time an appliance switches on (its glow, its lamp's light, the "!" marker, the floor ring,
+	## the noise burst) or another character is picked. So at the start all of it is drawn once, for a few frames,
+	## under a cover in the background colour, which then fades out.
+	var layer := CanvasLayer.new()
+	layer.layer = 98   # above the HUD and the noise, below the frame's background (layout.gd: 99)
+	var cover := ColorRect.new()
+	cover.color = GameConfig.BACKGROUND_COLOR
+	cover.set_anchors_preset(Control.PRESET_FULL_RECT)
+	cover.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	layer.add_child(cover)
+	add_child(layer)
+	var size: Vector2 = apartments[model]["size"]
+	rig.target = null
+	rig.use_bounds = false
+	rig.global_position = Vector3(size.x / 2.0, 0.3, -size.y / 2.0)
+	rig.zoom = (size.x + size.y) * 0.5   # the whole apartment in view
+	rig._size = rig.zoom
+	rig._apply_frame()
+	for a in apps:
+		a.set_on(true, 0.0)
+	var extra: Array[Node3D] = []
+	for i in _char_scenes.size():
+		var inst := (_char_scenes[i] as PackedScene).instantiate() as Node3D
+		add_child(inst)
+		inst.position = spawn_pos + Vector3(0.8 * (i + 1), 0.0, 0.0)
+		extra.append(inst)
+	fx.glitch(1.0, 0.5)
+	for k in 3:
+		await RenderingServer.frame_post_draw
+	for a in apps:   # and with the lamps off again (the objects they lit, without them)
+		if a.on_node:
+			a.on_node.visible = false
+	await RenderingServer.frame_post_draw
+	for a in apps:
+		a.set_on(false, 0.0)
+	for e in extra:
+		e.queue_free()
+	rig.target = player
+	var tw := create_tween()
+	tw.tween_property(cover, "modulate:a", 0.0, 0.3)
+	tw.tween_callback(layer.queue_free)
+
+
+func _og_shot() -> bool:
+	for a in OS.get_cmdline_user_args():
+		if a.begins_with("--og-shot="):
+			return true   # the picture for the link preview hides the pouf: keep the furniture separate
+	return false
+
+
+func _merge_static(lvl: Node3D) -> void:
+	## The apartment is made of 350-560 small meshes, and every one is a separate draw call (and another one in
+	## the sun's shadow pass): too many for a browser. The furniture, walls and floors never change, so in each
+	## room they are merged into one mesh with a surface per material (~5x fewer draw calls). The rooms stay
+	## separate, so a lamp lights only its own room and the camera skips rooms out of view. The glowing parts of
+	## the appliances (shown while on, blinking) and hidden parts are left as they are. The materials are the same objects, so
+	## the second colouring of the apartments (_recolor) still works.
+	var groups := {}   # room node -> {material instance id: [material, SurfaceTool]}
+	for node in lvl.find_children("*", "MeshInstance3D", true, false):
+		var mi := node as MeshInstance3D
+		if mi.mesh == null or not mi.is_visible_in_tree() or _switched_part(mi):
+			continue
+		var tris := true
+		for si in mi.mesh.get_surface_count():
+			tris = tris and mi.mesh.surface_get_primitive_type(si) == Mesh.PRIMITIVE_TRIANGLES
+		if not tris:
+			continue
+		var room := _room_node(mi, lvl)
+		var to_room := room.global_transform.affine_inverse() * mi.global_transform
+		if not groups.has(room):
+			groups[room] = {}
+		var g: Dictionary = groups[room]
+		for si in mi.mesh.get_surface_count():
+			var mat := mi.get_active_material(si)
+			var key := mat.get_instance_id() if mat else 0
+			if not g.has(key):
+				g[key] = [mat, SurfaceTool.new()]
+			(g[key][1] as SurfaceTool).append_from(mi.mesh, si, to_room)
+		mi.mesh = null   # the node stays (other nodes may hang under it), it just draws nothing
+	for room in groups:
+		var mesh := ArrayMesh.new()
+		for key in groups[room]:
+			var st: SurfaceTool = groups[room][key][1]
+			st.set_material(groups[room][key][0])
+			st.commit(mesh)
+		var out := MeshInstance3D.new()
+		out.name = "merged_static"
+		out.mesh = mesh
+		(room as Node3D).add_child(out)
+
+
+func _switched_part(n: Node) -> bool:
+	## The glowing part of an appliance (APPL_<id>/<id>_on): shown only while it is on, and it blinks.
+	while n:
+		var p := n.get_parent()
+		if p and String(p.name).begins_with("APPL_") and String(n.name).ends_with("_on"):
+			return true
+		n = p
+	return false
+
+
+func _room_node(n: Node, lvl: Node3D) -> Node3D:
+	## The room the node belongs to (FLOOR_<n>/ROOM_<id>/...); the outer walls' caps and the floor slab
+	## (straight under FLOOR_<n>) go together under FLOOR_<n>.
+	while n.get_parent() and n.get_parent() != lvl:
+		var p := n.get_parent()
+		if String(p.name).begins_with("FLOOR_"):
+			return n as Node3D if String(n.name).begins_with("ROOM_") and n is Node3D else p as Node3D
+		n = p
+	return lvl
+
+
 func _set_lift_number(n: int) -> void:
 	if lift_label:
 		lift_label.text = str(n)
@@ -555,10 +681,10 @@ func start_floor(idx: int) -> void:
 	hud.show_play(idx + 1, GameConfig.FLOORS.size())
 	_update_hud()
 	var fresh := _new_appliances(idx + 1)
-	_floor_sub = "Поверх %d з %d" % [idx + 1, GameConfig.FLOORS.size()]
+	_floor_sub = Lang.t("Поверх %d з %d") % [idx + 1, GameConfig.FLOORS.size()]
 	if not fresh.is_empty():
 		_floor_sub += " · " + fresh
-	hud.big("Поверх %d" % (idx + 1), fresh if fresh != "" else "Вимикай прилади, бережи енергію!")
+	hud.big(Lang.t("Поверх %d") % (idx + 1), fresh if fresh != "" else "Вимикай прилади, бережи енергію!")
 	music.power_up()
 	music.calm(1.0)
 	await hud.fade_to(0.0, 0.3)
@@ -570,10 +696,10 @@ func _new_appliances(floor_num: int) -> String:
 	var names: Array[String] = []
 	for a in apps:
 		if a.min_floor == floor_num and floor_num > 1 and not a.never_off:
-			names.append("%s · %d Вт" % [a.label, int(a.power)])
+			names.append(Lang.t("%s · %d Вт") % [Lang.t(a.label), int(a.power)])
 	if names.is_empty():
 		return ""
-	return ("Новий прилад: " if names.size() == 1 else "Нові прилади: ") + ", ".join(names)
+	return Lang.t("Новий прилад: " if names.size() == 1 else "Нові прилади: ") + ", ".join(names)
 
 
 func _reset_appliances() -> void:
@@ -659,9 +785,9 @@ func _play_tick(delta: float) -> void:
 	var near := _nearest_appliance()
 	if near and not player.locked:
 		if near.never_off:
-			hud.prompt("%s — його не можна вимикати" % near.label)
+			hud.prompt(Lang.t("%s — його не можна вимикати") % Lang.t(near.label))
 		else:
-			hud.prompt("Нажміть [color=#ffae00]%s[/color] щоб вимкнути: %s · %d Вт" % [hud.key_name("Пробіл"), near.label,
+			hud.prompt(Lang.t("Нажміть [color=#ffae00]%s[/color] щоб вимкнути: %s · %d Вт") % [hud.key_name("Пробіл"), Lang.t(near.label),
 					int(near.power)])
 	else:
 		hud.prompt("")
@@ -688,7 +814,7 @@ func _update_indicators() -> void:
 	for a in apps:
 		if a.is_on and not a.never_off:
 			var world := Vector3(a.pos.x, a.top_y - 0.3, a.pos.z)
-			items.append({"pos": rig.cam.unproject_position(world), "label": a.label})
+			items.append({"pos": rig.cam.unproject_position(world), "label": Lang.t(a.label)})
 	hud.set_indicators(items)
 
 
@@ -803,7 +929,7 @@ func _end_round() -> void:
 	if not all_off:
 		_finish(false, "Не всі прилади вимкнені.")
 	elif econ < thr:
-		_finish(false, "Економія %d%% — нижче за поріг %d%%." % [roundi(econ * 100), roundi(thr * 100)])
+		_finish(false, Lang.t("Економія %d%% — нижче за поріг %d%%.") % [roundi(econ * 100), roundi(thr * 100)])
 	else:
 		_finish(true, "")
 
@@ -861,15 +987,15 @@ func _finish(win: bool, reason: String, blackout := false) -> void:
 	var rank: int = save.submit(_player(), run_score, floor_idx + 1, GameConfig.CHARACTERS[char_idx]["id"])
 	var lines: Array = []
 	if reason != "":
-		lines.append(reason)
-	lines.append("Зекономлено: %.1f Вт • год" % attempt_saved)
-	lines.append("Економія %d%%  (потрібно ≥ %d%%)" % [roundi(econ * 100), roundi(thr * 100)])
+		lines.append(Lang.t(reason))
+	lines.append(Lang.t("Зекономлено: %.1f Вт • год") % attempt_saved)
+	lines.append(Lang.t("Економія %d%%  (потрібно ≥ %d%%)") % [roundi(econ * 100), roundi(thr * 100)])
 	var best: float = save.best_of(_player())
 	if best > run_score + 0.05:
-		lines.append("Рахунок гри: %.1f Вт • год  (рекорд %.1f)" % [run_score, best])
+		lines.append(Lang.t("Рахунок гри: %.1f Вт • год  (рекорд %.1f)") % [run_score, best])
 	else:
-		lines.append("Рахунок гри: %.1f Вт • год  — новий рекорд!" % run_score if run_score > 0.0 else "Рахунок гри: 0 Вт • год")
-	lines.append("Місце в рейтингу: %d" % rank)
+		lines.append(Lang.t("Рахунок гри: %.1f Вт • год  — новий рекорд!") % run_score if run_score > 0.0 else Lang.t("Рахунок гри: 0 Вт • год"))
+	lines.append(Lang.t("Місце в рейтингу: %d") % rank)
 	var last := floor_idx >= GameConfig.FLOORS.size() - 1
 	var hints: Array = []
 	if win:
@@ -886,10 +1012,10 @@ func _show_complete() -> void:
 	music.victory()   # keeps playing from the last floor's result screen
 	_result_camera()
 	hud.show_result(true, "Будинок врятовано!",
-			["Ви пройшли всі %d поверхів." % GameConfig.FLOORS.size(),
-			 "Зірок зібрано: %d з %d" % [total_stars, GameConfig.FLOORS.size() * 3],
-			 "Рахунок гри: %.1f Вт • год" % run_passed_wh,
-			 "Місце в рейтингу: %d" % save.rank_of(_player())],
+			[Lang.t("Ви пройшли всі %d поверхів.") % GameConfig.FLOORS.size(),
+			 Lang.t("Зірок зібрано: %d з %d") % [total_stars, GameConfig.FLOORS.size() * 3],
+			 Lang.t("Рахунок гри: %.1f Вт • год") % run_passed_wh,
+			 Lang.t("Місце в рейтингу: %d") % save.rank_of(_player())],
 			clampi(roundi(3.0 * total_stars / (GameConfig.FLOORS.size() * 3.0)), 1, 3),
 			[["Enter", "щоб грати знову", true], ["Esc", "спочатку"]])
 	hud.show_leaderboard(save.entries, _player())
@@ -898,7 +1024,10 @@ func _show_complete() -> void:
 # ------------------------------------------------------------------ input
 func _unhandled_input(event: InputEvent) -> void:
 	if event.is_action_pressed("music") and not event.is_echo():
-		hud.toast("Музика: %s" % ("увімкнено" if music.toggle() else "вимкнено"))
+		hud.toast(Lang.t("Музика: %s") % Lang.t("увімкнено" if music.toggle() else "вимкнено"))
+		return
+	if event.is_action_pressed("language") and not event.is_echo() and state in [State.NAME, State.SELECT]:
+		_switch_language()   # L in the menu (not while typing the name: the field takes the key)
 		return
 	# zoom: + / - keys or mouse wheel (during play)
 	if state == State.PLAY or state == State.COUNTDOWN:
@@ -914,7 +1043,7 @@ func _unhandled_input(event: InputEvent) -> void:
 				dz = 0.25
 		if dz != 0.0:
 			rig.zoom = clampf(rig.zoom + dz, GameConfig.ZOOM_MIN, GameConfig.ZOOM_MAX)
-			hud.toast("Масштаб: %.1f" % rig.zoom)
+			hud.toast(Lang.t("Масштаб: %.1f") % rig.zoom)
 			return
 	if event.is_echo():
 		return
@@ -963,6 +1092,16 @@ func _unhandled_input(event: InputEvent) -> void:
 				enter_select()
 
 
+func _switch_language() -> void:
+	Lang.toggle()
+	DisplayServer.window_set_title(Lang.t("Енергетична криза"))
+	hud.relabel()
+	if state == State.SELECT:
+		hud.show_select(GameConfig.CHARACTERS[char_idx])
+	sfx.play("select")
+	hud.toast("Мова: українська" if Lang.code == "uk" else "Language: English")
+
+
 func _refresh_select() -> void:
 	sfx.play("select")
 	player.setup(GameConfig.CHARACTERS[char_idx])
@@ -981,6 +1120,7 @@ func _shot(name: String) -> void:
 func _run_select_shots(dir: String) -> void:
 	## Screenshots of the menu for every character: with the menu card and clean (no UI).
 	_auto_shots = dir
+	state = State.SELECT
 	await get_tree().create_timer(1.0).timeout
 	for ci in GameConfig.CHARACTERS.size():
 		char_idx = ci
@@ -997,6 +1137,11 @@ func _run_select_shots(dir: String) -> void:
 	for k in 4:
 		await get_tree().create_timer(0.08).timeout
 		await _shot("select_slide_%d" % (k + 1))
+	# L: the other language on the spot
+	await get_tree().create_timer(1.0).timeout
+	_switch_language()
+	await get_tree().create_timer(0.3).timeout
+	await _shot("select_lang_switched")
 	get_tree().quit()
 
 
@@ -1214,7 +1359,7 @@ func _run_result_shots(dir: String) -> void:
 	spawned = 3; switched = 1; consumed_wh = 1.6; potential_wh = 3.3; fridge_wh = 0.5
 	_update_hud(400.0, 2)
 	_update_indicators()
-	hud.prompt("Нажміть [color=#ffae00]%s[/color] щоб вимкнути: Телевізор · 150 Вт" % hud.key_name("Пробіл"))
+	hud.prompt(Lang.t("Нажміть [color=#ffae00]%s[/color] щоб вимкнути: %s · %d Вт") % [hud.key_name("Пробіл"), Lang.t("Телевізор"), 150])
 	await get_tree().create_timer(0.8).timeout
 	await _shot("play_1_hud")
 	fx.glitch(GameConfig.GLITCH_STRENGTH, 3.0)   # same strength as in game, held longer for the shot

@@ -65,6 +65,7 @@ var indicators: Indicators
 var _boosted: Array = []
 var touch_keys := false   # hints name the on-screen buttons (0 / X) instead of Enter / Space / Esc
 var _hints: Array = []    # [key label, key, enter icon or null] of every hint row
+var _texts: Array = []    # [label, Ukrainian text]: switching the language (Lang) relabels them
 var prompt_card: PanelContainer
 var prompt_rtl: RichTextLabel
 var big_box: VBoxContainer
@@ -86,6 +87,7 @@ var _gaps: Array = []             # [box, desktop separation, phone separation]
 var _frame := Rect2()
 var _hud_s := 1.0
 var _view := Rect2()
+var _sheet_look := []
 
 # menu page
 var select_panel: VBoxContainer
@@ -312,7 +314,9 @@ func _ready() -> void:
 
 func _label(text: String, size: int, color := DARK, shadow := 0) -> Label:
 	var l := Label.new()
-	l.text = text
+	l.text = Lang.t(text)   # the Ukrainian text is the key (lang.gd)
+	if text != "":
+		_texts.append([l, text])
 	l.add_theme_font_size_override("font_size", size)
 	l.add_theme_color_override("font_color", color)
 	if shadow > 0:
@@ -424,7 +428,7 @@ func _hint_row(key: String, action: String, size := 16, enter_icon := false) -> 
 ## The key as the player sees it: on a touch screen the name of the on-screen button that does the same.
 func key_name(key: String) -> String:
 	if not touch_keys:
-		return key
+		return Lang.t(key)   # "Пробіл" -> "Space" in English
 	var b: Dictionary = GameConfig.TOUCH_BUTTONS
 	return {"Enter": b["a"], "Пробіл": b["a"], "Esc": b["b"]}.get(key, key)
 
@@ -434,11 +438,30 @@ func set_touch_keys(on: bool) -> void:
 	if on == touch_keys:
 		return
 	touch_keys = on
+	_rename_keys()
+
+
+func _rename_keys() -> void:
 	_hints = _hints.filter(func(h): return is_instance_valid(h[0]))
 	for h in _hints:
 		(h[0] as Label).text = key_name(h[1])
 		if h[2]:
-			(h[2] as TextureRect).visible = not on
+			(h[2] as TextureRect).visible = not touch_keys
+
+
+## The language has just been switched (Lang.toggle): every label still showing its fixed text gets it in the
+## new language (labels whose text was set since, e.g. the character's name, are set again by main.gd).
+func relabel() -> void:
+	var before := "en" if Lang.code == "uk" else "uk"
+	_texts = _texts.filter(func(e): return is_instance_valid(e[0]))
+	for e in _texts:
+		var l: Label = e[0]
+		var key: String = e[1]
+		var shown: String = key if before == "uk" else Lang.EN.get(key, key)
+		if l.text == shown:
+			l.text = Lang.t(key)
+	name_edit.placeholder_text = Lang.t("Нікнейм")
+	_rename_keys()
 
 
 func _build_hud() -> void:
@@ -584,7 +607,7 @@ func _build_name() -> void:
 	var body: VBoxContainer = _gap(_box(true, 8), 8, 6)
 	body.add_child(_label("Ім'я гравця", 24))
 	name_edit = LineEdit.new()
-	name_edit.placeholder_text = "Нікнейм"
+	name_edit.placeholder_text = Lang.t("Нікнейм")
 	name_edit.max_length = 16
 	name_edit.custom_minimum_size = Vector2(380, 52)
 	name_edit.add_theme_font_size_override("font_size", 28)
@@ -678,7 +701,7 @@ func show_leaderboard(entries: Array, player: String, title := "Рейтинг �
 	if not GameConfig.SHOW_LEADERBOARD:   # table hidden for now; results are still saved
 		board_panel.visible = false
 		return
-	board_title.text = title
+	board_title.text = Lang.t(title)
 	for c in board_rows.get_children():
 		c.queue_free()
 	if entries.is_empty():
@@ -702,7 +725,7 @@ func show_leaderboard(entries: Array, player: String, title := "Рейтинг �
 func show_select(cfg: Dictionary) -> void:
 	_all_off(true)
 	_show_sheet(select_panel)
-	sel_name.text = cfg["name"]
+	sel_name.text = Lang.t(cfg["name"])
 	sel_speed.value = clampi(roundi(remap(cfg["speed"], 2.4, 4.0, 1, 5)), 1, 5)
 	sel_switch.value = clampi(roundi(remap(cfg["switch_time"], 1.1, 0.25, 1, 5)), 1, 5)
 	sel_speed.queue_redraw()
@@ -714,7 +737,7 @@ func show_play(floor_num: int, total: int) -> void:
 	hud_left.visible = true
 	hud_right.visible = true
 	set_hud_light(false)
-	floor_lbl.text = "Поверх %d з %d" % [floor_num, total]
+	floor_lbl.text = Lang.t("Поверх %d з %d") % [floor_num, total]
 
 
 func set_hud_light(on: bool) -> void:
@@ -736,11 +759,11 @@ func update_play(time_left: float, load_kw: float, limit_kw: float, wh: float, e
 	meter_bar.fill = BAR_GREEN if frac < 0.7 else (ACCENT if frac <= 1.0 else RED)
 	meter_bar.fill_tex = Icons.png("meter_fill_ok" if frac < 0.7 else ("meter_fill_warn" if frac <= 1.0 else "meter_fill_danger"))
 	meter_bar.queue_redraw()
-	load_lbl.text = "%.1f / %.1f кВт" % [load_kw, limit_kw]
-	wh_lbl.text = "Спожито: %.1f Вт • год" % wh
-	econ_lbl.text = "%d%% економія" % roundi(econ * 100.0)
+	load_lbl.text = Lang.t("%.1f / %.1f кВт") % [load_kw, limit_kw]
+	wh_lbl.text = Lang.t("Спожито: %.1f Вт • год") % wh
+	econ_lbl.text = Lang.t("%d%% економія") % roundi(econ * 100.0)
 	thr_lbl.text = "≥ %d%%" % roundi(thr * 100.0)
-	on_lbl.text = "Увімкнено приладів: %d" % on_count
+	on_lbl.text = Lang.t("Увімкнено приладів: %d") % on_count
 
 
 func prompt(bbcode: String) -> void:
@@ -750,13 +773,13 @@ func prompt(bbcode: String) -> void:
 
 
 func big(text: String, sub := "", color := ACCENT) -> void:
-	big_lbl.text = text
-	sub_lbl.text = sub
+	big_lbl.text = Lang.t(text)
+	sub_lbl.text = Lang.t(sub)
 	big_lbl.add_theme_color_override("font_color", color)
 
 
 func toast(text: String) -> void:
-	toast_lbl.text = text
+	toast_lbl.text = Lang.t(text)
 	_toast_t = 2.2
 
 
@@ -912,7 +935,10 @@ func _layout_sheet() -> void:
 			sheet.position = Vector2(0.0, _frame.size.y - h + (h + r_px) * _sheet_off)
 			var shown := clampf(_frame.size.y - sheet.position.y, 0.0, _frame.size.y * 0.9)
 			view = Rect2(_frame.position, _frame.size - Vector2(0.0, shown))
-		sheet.queue_redraw()
+		var look := [sheet.size, sheet.radius, sheet.side]
+		if look != _sheet_look:   # redraw only when the panel's shape changed (moving it needs no redraw)
+			_sheet_look = look
+			sheet.queue_redraw()
 	if view != _view:
 		_view = view
 		view_changed.emit(view)
@@ -987,7 +1013,7 @@ func show_result(win: bool, title: String, lines: Array, stars: int, hints: Arra
 			var on := i < stars
 			var fallback := Icons.svg("star_on" if on else "star_off", Icons.STAR_SVG if on else Icons.STAR_GREY_SVG, 32)
 			res_stars.add_child(_icon(_tex("star_on" if on else "star_off", fallback), Vector2(32, 32)))
-	res_title.text = title
+	res_title.text = Lang.t(title)
 	res_title.add_theme_color_override("font_color", GREEN if win else RED)
 	for c in res_lines.get_children():
 		c.queue_free()
