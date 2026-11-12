@@ -38,7 +38,7 @@ body {
 }
 
 #status {
-	background-color: #242424;
+	background-color: #e5ecee;
 	display: flex;
 	flex-direction: column;
 	justify-content: center;
@@ -92,7 +92,7 @@ body {
 		</style>
 		<link id="-gd-engine-icon" rel="icon" type="image/png" href="index.icon.png" />
 <link rel="apple-touch-icon" href="index.apple-touch-icon.png"/>
-
+<meta name="description" content="Гра про економію електроенергії: вимикай прилади в квартирі, поки мережу не перевантажило й не вибило світло. 10 поверхів, 4 персонажі, грається просто в браузері."><meta name="theme-color" content="#e5ecee"><meta property="og:type" content="website"><meta property="og:site_name" content="Енергетична криза"><meta property="og:title" content="Енергетична криза"><meta property="og:description" content="Гра про економію електроенергії: вимикай прилади в квартирі, поки мережу не перевантажило й не вибило світло. 10 поверхів, 4 персонажі, грається просто в браузері."><meta property="og:url" content="https://olprmk.github.io/energy-crisis/"><meta property="og:image" content="https://olprmk.github.io/energy-crisis/og.png"><meta property="og:image:width" content="1200"><meta property="og:image:height" content="630"><meta property="og:image:alt" content="Родина з гри «Енергетична криза» у вітальні"><meta property="og:locale" content="uk_UA"><meta name="twitter:card" content="summary_large_image"><meta name="twitter:image" content="https://olprmk.github.io/energy-crisis/og.png"><style>body, #status { background-color: #e5ecee !important; } #status-splash { max-width: 86% !important; } #status-progress { bottom: auto !important; top: calc(50% + 64px); width: min(320px, 60%) !important; height: 10px; appearance: none; -webkit-appearance: none; border: 0; border-radius: 5px; background-color: #cdd8dc; overflow: hidden; } #status-progress::-webkit-progress-bar { background-color: #cdd8dc; border-radius: 5px; } #status-progress::-webkit-progress-value { background-color: #ffae00; border-radius: 5px; } #status-progress::-moz-progress-bar { background-color: #ffae00; border-radius: 5px; }</style>
 	</head>
 	<body>
 		<canvas id="canvas">
@@ -104,14 +104,14 @@ body {
 		</noscript>
 
 		<div id="status">
-			<img id="status-splash" class="show-image--true fullsize--true use-filter--true" src="index.png" alt="">
+			<img id="status-splash" class="show-image--true fullsize--false use-filter--true" src="index.png" alt="">
 			<progress id="status-progress"></progress>
 			<div id="status-notice"></div>
 		</div>
 
 		<script src="index.js"></script>
 		<script>
-const GODOT_CONFIG = {"args":[],"canvasResizePolicy":2,"emscriptenPoolSize":8,"ensureCrossOriginIsolationHeaders":true,"executable":"index","experimentalVK":true,"fileSizes":{"index.pck":51165196,"index.wasm":39514754},"focusCanvas":true,"gdextensionLibs":[],"godotPoolSize":4};
+const GODOT_CONFIG = {"args":[],"canvasResizePolicy":2,"emscriptenPoolSize":8,"ensureCrossOriginIsolationHeaders":true,"executable":"index","experimentalVK":true,"fileSizes":{"index.pck":51449232,"index.wasm":39514754},"focusCanvas":true,"gdextensionLibs":[],"godotPoolSize":4};
 const GODOT_THREADS_ENABLED = false;
 const engine = new Engine(GODOT_CONFIG);
 
