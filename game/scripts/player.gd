@@ -3,10 +3,13 @@ extends CharacterBody3D
 ## Player character: camera-relative movement, facing, animations, switching appliances off.
 
 signal switch_hit   # emitted in the middle of the switch_off animation
+signal step(index: int)   # a foot (paw) touches the floor in the walk animation: index into step_phases
 
 var speed := 3.0
 var switch_time := 0.6
 var bot_dir := Vector3.ZERO   # autotest --physical: direction to walk instead of the keys
+var step_phases: Array = []   # moments of the walk cycle (0..1) when a foot touches the floor (CHARACTERS)
+var _walk_phase := -1.0
 var input_enabled := false
 var locked := false
 var cam: Camera3D
@@ -32,6 +35,7 @@ func _init() -> void:
 func setup(cfg: Dictionary) -> void:
 	speed = cfg["speed"]
 	switch_time = cfg["switch_time"]
+	step_phases = cfg.get("step_phases", [])
 	if model:
 		model.queue_free()
 	model = _load_model(cfg["file"])
@@ -139,6 +143,25 @@ func _physics_process(delta: float) -> void:
 		play("walk", clampf(spd / 2.3, 0.6, 2.0))
 	else:
 		play("idle")
+
+
+func _process(_delta: float) -> void:
+	_track_steps()
+
+
+func _track_steps() -> void:
+	## Emits `step` when the walk animation passes a moment where a foot touches the floor.
+	if _cur_anim != "walk" or anim == null or anim.current_animation != "walk" or not anim.is_playing():
+		_walk_phase = -1.0
+		return
+	var ph := anim.current_animation_position / maxf(anim.current_animation_length, 0.001)
+	if _walk_phase >= 0.0 and ph != _walk_phase:
+		for i in step_phases.size():
+			var p: float = step_phases[i]
+			var crossed := (_walk_phase < p and p <= ph) if ph > _walk_phase else (p > _walk_phase or p <= ph)
+			if crossed:
+				step.emit(i)
+	_walk_phase = ph
 
 
 func _soften_metals(n: Node) -> void:

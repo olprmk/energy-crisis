@@ -2,8 +2,8 @@ extends Node
 ## Adaptive layout (Figma "iPhone 17 - 1", node 29:2): the game is shown in a rounded frame on a light
 ## background, and the frame follows the window:
 ##   * landscape (desktop): the frame fills the window, with a small margin all round;
-##   * portrait (phone): the frame takes the top half, the touch controls (d-pad + two buttons) sit below it;
-##   * landscape on a touch screen: the frame in the middle, the d-pad on the left, the buttons on the right.
+##   * portrait (phone): the frame takes the top half, the touch controls (stick + two buttons) sit below it;
+##   * landscape on a touch screen: the frame in the middle, the stick on the left, the buttons on the right.
 ## The 3D view renders the whole window; the camera is shifted and zoomed so the scene sits in the frame
 ## (camera_rig.gd), the HUD is laid out inside the frame and scaled to it (hud.gd), and everything outside the
 ## frame is painted with the background colour (this node).
@@ -124,57 +124,69 @@ func relayout() -> void:
 
 
 func _portrait(area: Rect2, m: float, D: Dictionary) -> Dictionary:
-	## The mockup: the frame on top (half the screen), the d-pad and the buttons under it.
+	## The mockup: the frame on top (half the screen), the stick and the buttons under it.
 	var c: float = area.size.x / D["ref_width"]
-	var below: float = (D["gap"] + D["dpad"] + D["bottom"]) * c   # room the controls need under the frame
+	var below: float = (D["gap"] + D["stick"] + D["bottom"]) * c   # room the controls need under the frame
 	var fh := maxf(minf(area.size.y * 0.5, area.size.y - m - below), area.size.y * 0.3)
 	var f := Rect2(area.position.x + m, area.position.y + m, area.size.x - 2.0 * m, fh)
 	var top: float = f.end.y + D["gap"] * c
 	var side: float = D["side"] * c
-	var r: float = D["dpad"] * 0.5 * c
+	var r: float = D["stick"] * 0.5 * c
 	var b: float = D["button"] * 0.5 * c
 	return {"frame": f, "buttons": {
-		"dpad": [Vector2(area.position.x + side + r, top + r), r],
+		"stick": [Vector2(area.position.x + side + r, top + r), r],
 		"a": [Vector2(area.end.x - side - b, top + b), b],
 		"b": [Vector2(area.end.x - side - 3.0 * b, top + D["button_drop"] * c + b), b]}}
 
 
 func _landscape_touch(area: Rect2, m: float, D: Dictionary) -> Dictionary:
-	## Phone on its side: the d-pad left of the frame, the buttons right of it.
+	## Phone on its side: the stick left of the frame, the buttons right of it.
 	var c: float = minf(area.size.y, area.size.x * 0.5) / D["ref_width"]
 	var side: float = D["side"] * c
-	var r: float = D["dpad"] * 0.5 * c
+	var r: float = D["stick"] * 0.5 * c
 	var b: float = D["button"] * 0.5 * c
 	var col := side * 2.0 + 2.0 * r     # width of a controls column
 	var f := Rect2(area.position.x + col, area.position.y + m, area.size.x - 2.0 * col, area.size.y - 2.0 * m)
 	var cy := area.position.y + area.size.y * 0.62
 	return {"frame": f, "buttons": {
-		"dpad": [Vector2(area.position.x + side + r, cy), r],
+		"stick": [Vector2(area.position.x + side + r, cy), r],
 		"a": [Vector2(area.end.x - side - b, cy - D["button_drop"] * c * 0.5), b],
 		"b": [Vector2(area.end.x - side - 3.0 * b, cy + D["button_drop"] * c * 0.5), b]}}
 
 
 # ======================================================================= touch controls
 class TouchPad:
-	## The d-pad and the two round buttons from the mockup. The d-pad sends the move_* actions (8 directions),
-	## the upper right button "confirm" (Enter: name, start, switch off, next floor), the lower one "back" (Esc).
+	## An analog stick and the two round buttons of the mockup. The stick: the knob follows the finger (clamped
+	## to the base) and the move_* actions get analog strengths, so a small push walks slowly and a full push
+	## runs; a decisive push also sends a "pressed" event (the menu: next / previous character).
+	## The upper right button is "confirm" (Enter: name, start, switch off, next floor), the lower one "back" (Esc).
 	## Works with several fingers at once, and with the mouse.
 	extends Control
 
 	const FILL := Color(1, 1, 1, 0.2)
 	const FILL_DOWN := Color(1, 1, 1, 0.6)
+	const KNOB_FILL := Color(1, 1, 1, 0.55)
+	const KNOB_FILL_DOWN := Color(1, 1, 1, 0.85)
 	const LINE := Color("b3c5cb")
 	const LINE_DOWN := Color("7f969d")
 	const LABEL := Color("b3c5cb")   # button names (Pixelify Sans 40 px in the mockup, 1 px black shadow)
-	const DEAD := 0.28            # d-pad dead zone (share of its radius)
-	const GRAB := 1.25            # a touch this far out (share of the radius) still counts
+	const GRAB := 1.4             # a touch this far out (share of the radius) still counts
+	const KNOB := 0.42            # knob radius: share of the stick's radius
+	const DEAD := 0.12            # stick: no movement this close to the centre (share of the knob's travel)
+	const FULL := 0.75            # full speed from this far out
+	const PRESS := 0.55           # menu "press" (move_left / move_right event) from this far out ...
+	const RELEASE := 0.3          # ... and released again below this
+	const RETURN := 18.0          # knob springs back to the centre (rate) when let go
 
 	var buttons := {}             # name -> [centre, radius]
 	var font: Font = load("res://assets/fonts/PixelifySansUA.ttf")
 	var unit := 1.0               # mockup px -> logical px (line widths)
 	var _touches := {}            # touch index -> control name
-	var _dirs := {}               # move action -> held
 	var _down := {}               # button name -> held
+	var _knob := Vector2.ZERO     # knob offset: share of its travel (length <= 1)
+	var _held := false            # the stick is held
+	var _str := {}                # move action -> strength set by the stick
+	var _evt := {}                # move action -> a "pressed" event was sent
 
 	func set_buttons(b: Dictionary, u: float) -> void:
 		if b.is_empty():
@@ -185,12 +197,16 @@ class TouchPad:
 		queue_redraw()
 
 	func _hit(p: Vector2) -> String:
+		var best := ""
+		var best_d := INF
 		for n in buttons:
 			var c: Vector2 = buttons[n][0]
 			var r: float = buttons[n][1]
-			if p.distance_to(c) <= r * GRAB:
-				return n
-		return ""
+			var d := p.distance_to(c) / r
+			if d <= GRAB and d < best_d:
+				best = n
+				best_d = d
+		return best
 
 	func _input(event: InputEvent) -> void:
 		if not visible:
@@ -221,66 +237,85 @@ class TouchPad:
 			return
 		pos = get_global_transform_with_canvas().affine_inverse() * pos
 		if moved:
-			if _touches.get(idx, "") == "dpad":
-				_dpad(pos)
+			if _touches.get(idx, "") == "stick":
+				_stick(pos)
 				get_viewport().set_input_as_handled()
 			return
 		if pressed:
 			var n := _hit(pos)
-			if n == "":
+			if n == "" or (n == "stick" and _held):
 				return
 			_touches[idx] = n
-			if n == "dpad":
-				_dpad(pos)
+			if n == "stick":
+				_held = true
+				_stick(pos)
 			else:
 				_button(n, true)
 			get_viewport().set_input_as_handled()
 		elif _touches.has(idx):
 			var n: String = _touches[idx]
 			_touches.erase(idx)
-			if n == "dpad":
-				_set_dirs({})
+			if n == "stick":
+				_held = false
+				_set_vector(Vector2.ZERO)
 			else:
 				_button(n, false)
 			get_viewport().set_input_as_handled()
 
-	func _dpad(p: Vector2) -> void:
-		var c: Vector2 = buttons["dpad"][0]
-		var r: float = buttons["dpad"][1]
-		var d := (p - c) / r
-		var want := {}
-		if d.length() > DEAD:
-			var a := d.angle()   # 8 sectors of 45 degrees
-			var k := wrapi(int(roundf(a / (PI / 4.0))), 0, 8)
-			var dirs := [["move_right"], ["move_right", "move_down"], ["move_down"], ["move_down", "move_left"],
-					["move_left"], ["move_left", "move_up"], ["move_up"], ["move_up", "move_right"]]
-			for act in dirs[k]:
-				want[act] = true
-		_set_dirs(want)
+	func _travel() -> float:
+		## How far the knob's centre can move from the stick's centre.
+		return buttons["stick"][1] * (1.0 - KNOB * 0.5)
 
-	func _set_dirs(want: Dictionary) -> void:
-		for act in ["move_up", "move_down", "move_left", "move_right"]:
-			var on: bool = want.get(act, false)
-			if on != _dirs.get(act, false):
-				_dirs[act] = on
-				_send(act, on)
+	func _stick(p: Vector2) -> void:
+		var d: Vector2 = (p - buttons["stick"][0]) / _travel()
+		if d.length() > 1.0:
+			d = d.normalized()
+		_knob = d
+		var s := clampf((d.length() - DEAD) / (FULL - DEAD), 0.0, 1.0)
+		_set_vector(d.normalized() * s if s > 0.0 else Vector2.ZERO)
 		queue_redraw()
+
+	func _set_vector(v: Vector2) -> void:
+		## v: the movement wanted (length 0..1, +y = move_down). Input.get_vector() takes the actions' dead zone
+		## off the strengths, so it is added back here: the player walks at exactly |v| of the full speed.
+		## The strengths are set silently (Input.action_press, no events: the menu would see every finger move);
+		## only crossing PRESS / RELEASE sends a pressed / released event.
+		var dz := InputMap.action_get_deadzone("move_left") if InputMap.has_action("move_left") else 0.0
+		var send := v.normalized() * (dz + (1.0 - dz) * v.length()) if v != Vector2.ZERO else Vector2.ZERO
+		var acts := {"move_left": Vector2(-1, 0), "move_right": Vector2(1, 0), "move_up": Vector2(0, -1),
+				"move_down": Vector2(0, 1)}
+		for act in acts:
+			var axis: Vector2 = acts[act]
+			var st := maxf(send.dot(axis), 0.0)
+			var m := maxf(v.dot(axis), 0.0)
+			if m >= PRESS and not _evt.get(act, false):
+				_evt[act] = true
+				_send(act, true, st)
+			elif m < RELEASE and _evt.get(act, false):
+				_evt[act] = false
+				_send(act, false, 0.0)
+			if st > 0.0:
+				Input.action_press(act, st)
+			elif _str.get(act, 0.0) > 0.0:
+				Input.action_release(act)   # only what the stick pressed (the keyboard may hold the key)
+			_str[act] = st
 
 	func _button(n: String, on: bool) -> void:
 		_down[n] = on
 		_send("confirm" if n == "a" else "back", on)
 		queue_redraw()
 
-	func _send(act: String, on: bool) -> void:
+	func _send(act: String, on: bool, strength := 1.0) -> void:
 		var ev := InputEventAction.new()
 		ev.action = act
 		ev.pressed = on
-		ev.strength = 1.0 if on else 0.0
+		ev.strength = strength if on else 0.0
 		Input.parse_input_event(ev)
 
 	func _release_all() -> void:
 		_touches.clear()
-		_set_dirs({})
+		_held = false
+		_set_vector(Vector2.ZERO)
 		for n in _down:
 			if _down[n]:
 				_button(n, false)
@@ -289,31 +324,35 @@ class TouchPad:
 		if what == NOTIFICATION_APPLICATION_FOCUS_OUT:
 			_release_all()
 
+	func _process(delta: float) -> void:
+		if not _held and _knob != Vector2.ZERO:   # let go: the knob springs back
+			_knob = _knob.lerp(Vector2.ZERO, 1.0 - exp(-RETURN * delta))
+			if _knob.length() < 0.01:
+				_knob = Vector2.ZERO
+			queue_redraw()
+
 	func _draw() -> void:
 		var lw := maxf(unit, 1.0)
 		for n in buttons:
 			var c: Vector2 = buttons[n][0]
 			var r: float = buttons[n][1]
-			var down: bool = _down.get(n, false) or (n == "dpad" and _dirs.values().has(true))
-			draw_circle(c, r - lw * 0.5, FILL_DOWN if down and n != "dpad" else FILL)
+			if n == "stick":
+				# base, a faint ring of the knob's travel, the knob
+				draw_circle(c, r - lw * 0.5, FILL)
+				draw_arc(c, r - lw * 0.5, 0.0, TAU, 96, LINE, lw, true)
+				var kr := r * KNOB
+				var k := c + _knob * _travel()
+				draw_circle(k, kr, KNOB_FILL_DOWN if _held else KNOB_FILL)
+				draw_arc(k, kr - lw * 0.5, 0.0, TAU, 64, LINE_DOWN if _held else LINE, lw, true)
+				draw_arc(k, kr * 0.55, 0.0, TAU, 48, Color(LINE, 0.6), lw, true)   # grip
+				continue
+			var down: bool = _down.get(n, false)
+			draw_circle(c, r - lw * 0.5, FILL_DOWN if down else FILL)
 			draw_arc(c, r - lw * 0.5, 0.0, TAU, 96, LINE, lw, true)
-			if n != "dpad" and font:
+			if font:
 				var txt: String = GameConfig.TOUCH_BUTTONS.get(n, "")
 				var fs := int(roundf(40.0 * unit))
 				var w := r * 2.0
 				var base := Vector2(c.x - r, c.y + (font.get_ascent(fs) - font.get_descent(fs)) * 0.5)
 				draw_string(font, base + Vector2(unit, unit), txt, HORIZONTAL_ALIGNMENT_CENTER, w, fs, Color(0, 0, 0))
 				draw_string(font, base, txt, HORIZONTAL_ALIGNMENT_CENTER, w, fs, LINE_DOWN if down else LABEL)
-			if n == "dpad":
-				# four triangles 20 x 6 (mockup px), 10 px in from the edge
-				var w := 20.0 * unit
-				var h := 6.0 * unit
-				var inset := 10.0 * unit
-				var arrows := {"move_up": -PI / 2.0, "move_right": 0.0, "move_down": PI / 2.0, "move_left": PI}
-				for act in arrows:
-					var dir := Vector2.from_angle(arrows[act])
-					var side := Vector2(-dir.y, dir.x)
-					var tip := c + dir * (r - inset)
-					var base := tip - dir * h
-					var col := LINE_DOWN if _dirs.get(act, false) else LINE
-					draw_colored_polygon(PackedVector2Array([tip, base + side * w * 0.5, base - side * w * 0.5]), col)

@@ -15,11 +15,14 @@ var player: Player
 var rig: CameraRig
 var hud: Hud
 var sfx: Sfx
+var steps   # scripts/footsteps.gd
 var fx: ScreenFx
 var music   # Music (scripts/music.gd); preloaded so it works before the editor refreshes its class list
 var screen_layout   # scripts/layout.gd: the game frame on the background + touch controls (adapts to the window)
 var sun: DirectionalLight3D
 var env: Environment
+var _sun_energy := 1.2       # daylight (the blackout after a short circuit dims it)
+var _ambient_energy := 0.6
 var apps: Array[Appliance] = []
 var lift_label: Label3D   # floor number on the lift display
 var spawn_pos := Vector3.ZERO
@@ -54,6 +57,7 @@ var _all_floors := false     # autotest: keep going after a failed floor (balanc
 var _last_reason := ""       # why the last round ended (autotest report)
 var _physical := false       # autotest: the bot walks with collisions at the character's speed (finds stuck spots)
 var _bot_char := 0           # autotest: character (--char=1..4)
+var _step_count := {}        # autotest: footsteps heard per floor surface
 var _floor_from := 0         # autotest: floors _floor_from + 1 .. _floor_to
 var _floor_to := 0
 
@@ -85,6 +89,8 @@ func _ready() -> void:
 
 	sfx = Sfx.new()
 	add_child(sfx)
+	steps = preload("res://scripts/footsteps.gd").new()
+	add_child(steps)
 	fx = ScreenFx.new()
 	add_child(fx)
 	music = preload("res://scripts/music.gd").new()
@@ -95,18 +101,21 @@ func _ready() -> void:
 	add_child(player)
 	player.cam = rig.cam
 	player.switch_hit.connect(_on_switch_hit)
+	player.step.connect(_on_step)
 	rig.target = player
 	_use_apartment(0)
 	hud = Hud.new()
 	add_child(hud)
 	hud.name_submitted.connect(_on_name_submitted)
+	hud.view_changed.connect(func(r: Rect2) -> void: rig.view = r)   # the menu sheet covers part of the frame
 	screen_layout = preload("res://scripts/layout.gd").new()
 	add_child(screen_layout)
 	screen_layout.layout_changed.connect(_on_layout_changed)
 	var demo := false   # screenshot / test runs use a separate save file
 	for a in args:
 		if a.begins_with("--result-shots=") or a.begins_with("--select-shots=") or a.begins_with("--fail-shots=") \
-				or a.begins_with("--floor-shots=") or a == "--autotest":
+				or a.begins_with("--floor-shots=") or a.begins_with("--stick-shots=") or a.begins_with("--og-shot=") \
+				or a == "--autotest":
 			demo = true
 	save = preload("res://scripts/save_data.gd").new("user://save_demo.json" if demo else "user://save.json")
 	player_name = save.last_name
@@ -123,6 +132,12 @@ func _ready() -> void:
 			return
 		if arg.begins_with("--fail-shots="):
 			_run_fail_shots(arg.substr(13))
+			return
+		if arg.begins_with("--stick-shots="):
+			_run_stick_shots(arg.substr(14))
+			return
+		if arg.begins_with("--og-shot="):
+			_run_og_shot(arg.substr(10))
 			return
 	if autotest:
 		_run_autotest()
@@ -147,9 +162,11 @@ func _setup_window() -> void:
 func _on_layout_changed(frame: Rect2) -> void:
 	## Window resized / rotated: the HUD, the camera and the noise effect follow the game frame.
 	hud.set_touch_keys(screen_layout.touch_hints)
-	var boost: Array = GameConfig.TOUCH_HUD_BOOST.get(screen_layout.mode, [1.0, 1.0])
-	hud.set_frame(frame, screen_layout.hud_scale, boost[0], boost[1])
+	var boost: float = GameConfig.TOUCH_HUD_BOOST.get(screen_layout.mode, 1.0)
 	rig.frame = frame
+	if state in [State.SELECT, State.NAME, State.RESULT, State.COMPLETE]:
+		rig.zoom = _menu_zoom()   # turned between portrait and landscape on a menu screen
+	hud.set_frame(frame, screen_layout.hud_scale, boost, "bottom" if screen_layout.mode == "portrait" else "left")
 	rig.screen = screen_layout.screen
 	rig.snap()
 	fx.set_frame(frame)
@@ -194,6 +211,21 @@ func _setup_world() -> void:
 	sun.directional_shadow_max_distance = 40.0
 	sun.rotation_degrees = Vector3(-55, 30, 0)
 	add_child(sun)
+	if RenderingServer.get_current_rendering_method() == "gl_compatibility":
+		_compat_lighting()
+
+
+func _compat_lighting() -> void:
+	## Browsers (and old GPUs) use the Compatibility renderer: it has no HDR, so the glow lifts the whole picture
+	## to white and the sun comes out several times brighter than in Forward+. Settings that look like the desktop.
+	var c: Dictionary = GameConfig.COMPAT_LIGHTING
+	env.glow_enabled = c["glow"]
+	env.ssao_enabled = false
+	env.background_color = Color(c["background"])
+	env.ambient_light_energy = c["ambient"]
+	sun.light_energy = c["sun"]
+	_sun_energy = c["sun"]
+	_ambient_energy = c["ambient"]
 
 
 func _bl(a: Array) -> Vector3:
@@ -244,7 +276,7 @@ func _build_apartment(m: String) -> Dictionary:
 	ap["lift"] = _setup_lift_display(ap)
 	for l in lvl.find_children("*", "OmniLight3D", true, false):
 		var ol := l as OmniLight3D
-		ol.light_energy = 0.9
+		ol.light_energy = 0.9 * (GameConfig.COMPAT_LIGHTING["lamps"] if RenderingServer.get_current_rendering_method() == "gl_compatibility" else 1.0)
 		ol.omni_range = 2.4
 		ol.shadow_enabled = false
 	var size: Array = lay.get("size", [11, 8])
@@ -264,7 +296,34 @@ func _build_apartment(m: String) -> Dictionary:
 			if mat and not mats.has(mat.resource_name) and (mat.resource_name.begins_with("wall_") or mat.resource_name.begins_with("floor_")):
 				mats[mat.resource_name] = {"mat": mat, "color": mat.albedo_color}
 	ap["mats"] = mats
+	# floor of each room for the footsteps: tiles (kitchen, bath, floor_tile_* textures) or wooden planks
+	var surfaces := {}
+	for r in lay["rooms"]:
+		var e: Dictionary = mats.get("floor_" + String(r["id"]), {})
+		var tex: Texture2D = (e["mat"] as BaseMaterial3D).albedo_texture if e.has("mat") else null
+		var path := tex.resource_path.get_file() if tex else ""
+		surfaces[r["id"]] = "tile" if path.contains("tile") or path.contains("kitchen") or path.contains("bath") else "wood"
+	ap["surfaces"] = surfaces
 	return ap
+
+
+func _surface_at(p: Vector3) -> String:
+	var x := p.x
+	var y := -p.z
+	for r in layout["rooms"]:
+		var rc: Array = r["rect"]
+		if x >= float(rc[0]) and x <= float(rc[2]) and y >= float(rc[1]) and y <= float(rc[3]):
+			return apartments[model]["surfaces"].get(r["id"], "wood")
+	return "wood"
+
+
+func _on_step(i: int) -> void:
+	var cfg: Dictionary = GameConfig.CHARACTERS[char_idx]
+	var gains: Array = cfg.get("step_gains", [])
+	var surface := _surface_at(player.global_position)
+	steps.play(cfg.get("steps", "barefoot"), surface, gains[i] if i < gains.size() else 0.0)
+	if autotest:
+		_step_count[surface] = int(_step_count.get(surface, 0)) + 1
 
 
 func _recolor(ap: Dictionary, alt: bool) -> void:
@@ -437,7 +496,7 @@ func enter_select() -> void:
 	player.input_enabled = false
 	player.position = GameConfig.SELECT_POS
 	player.face_camera()
-	rig.zoom = GameConfig.SELECT_ZOOM
+	rig.zoom = _menu_zoom()
 	rig.use_bounds = false
 	rig.height_offset = GameConfig.SELECT_HEIGHT
 	rig.snap()
@@ -523,8 +582,8 @@ func _reset_appliances() -> void:
 
 
 func _set_blackout(on: bool) -> void:
-	sun.light_energy = 0.05 if on else 1.2
-	env.ambient_light_energy = 0.12 if on else 0.6
+	sun.light_energy = 0.05 if on else _sun_energy
+	env.ambient_light_energy = 0.12 if on else _ambient_energy
 
 
 func _cfg() -> Dictionary:
@@ -751,9 +810,13 @@ func _end_round() -> void:
 
 func _result_camera() -> void:
 	## Same framing as the menu (Figma frames 3-5): character centred, card bottom-left.
-	rig.zoom = GameConfig.SELECT_ZOOM
+	rig.zoom = _menu_zoom()
 	rig.use_bounds = false
 	rig.height_offset = GameConfig.SELECT_HEIGHT
+
+
+func _menu_zoom() -> float:
+	return GameConfig.SELECT_ZOOM_PHONE if screen_layout.mode == "portrait" else GameConfig.SELECT_ZOOM
 
 
 func _finish(win: bool, reason: String, blackout := false) -> void:
@@ -825,7 +888,8 @@ func _show_complete() -> void:
 	hud.show_result(true, "Будинок врятовано!",
 			["Ви пройшли всі %d поверхів." % GameConfig.FLOORS.size(),
 			 "Зірок зібрано: %d з %d" % [total_stars, GameConfig.FLOORS.size() * 3],
-			 "Рахунок гри: %.1f Вт • год · місце в рейтингу: %d" % [run_passed_wh, save.rank_of(_player())]],
+			 "Рахунок гри: %.1f Вт • год" % run_passed_wh,
+			 "Місце в рейтингу: %d" % save.rank_of(_player())],
 			clampi(roundi(3.0 * total_stars / (GameConfig.FLOORS.size() * 3.0)), 1, 3),
 			[["Enter", "щоб грати знову", true], ["Esc", "спочатку"]])
 	hud.show_leaderboard(save.entries, _player())
@@ -924,9 +988,15 @@ func _run_select_shots(dir: String) -> void:
 		await get_tree().create_timer(1.2).timeout
 		var id: String = GameConfig.CHARACTERS[ci]["id"]
 		await _shot("select_%d_%s" % [ci + 1, id])
-		hud.select_panel.visible = false
+		hud.hide_sheet()
+		rig.snap()
 		await get_tree().process_frame
 		await _shot("select_%d_%s_clean" % [ci + 1, id])
+	# the sheet sliding in (from the left; from below on a phone)
+	hud.show_select(GameConfig.CHARACTERS[char_idx])
+	for k in 4:
+		await get_tree().create_timer(0.08).timeout
+		await _shot("select_slide_%d" % (k + 1))
 	get_tree().quit()
 
 
@@ -969,7 +1039,7 @@ func _run_floor_shots(dir: String) -> void:
 	## Every floor's apartment: in play (start of the round, a few appliances on) and seen whole from above.
 	_auto_shots = dir
 	await get_tree().create_timer(0.5).timeout
-	for f in GameConfig.FLOORS.size():
+	for f in range(_floor_from, _floor_to if _floor_to > 0 else GameConfig.FLOORS.size()):
 		await start_floor(f)
 		state = State.BUSY
 		hud.big("")
@@ -1018,6 +1088,102 @@ func _run_fail_shots(dir: String) -> void:
 			await get_tree().create_timer(0.2).timeout
 			await _shot("fail_%d_%s_%d" % [ci + 1, GameConfig.CHARACTERS[ci]["id"], k + 1])
 		player.anim.speed_scale = 1.0
+	get_tree().quit()
+
+
+func _run_og_shot(path: String) -> void:
+	## Picture for the web page's link preview (src/web/og.py adds the title): the whole family in the living
+	## room, in the right part of the frame (the left part is left for the text). Saved at 1200 x 630.
+	get_window().size = Vector2i(1200, 630)
+	await get_tree().create_timer(0.5).timeout
+	hud.hide_sheet()
+	hud.visible = false
+	var pouf: Node = apartments["1"]["root"].find_child("pouf*", true, false)
+	if pouf is Node3D:
+		(pouf as Node3D).visible = false   # it would hide the father's feet
+	var right := Vector3(1, 0, -1).normalized()   # screen-horizontal in the isometric view
+	var front := Vector3(1, 0, 1).normalized()    # towards the camera
+	# [character, metres to the right, metres to the front]: a small group, the dog in front
+	var group := [[2, -0.8, -0.25], [0, 0.0, -0.45], [3, 0.75, -0.2], [1, 0.3, 0.45]]
+	for i in group.size():
+		var g: Array = group[i]
+		var p: Player = player if i == 0 else Player.new()
+		if i > 0:
+			add_child(p)
+		p.setup(GameConfig.CHARACTERS[g[0]])
+		p.input_enabled = false
+		p.position = GameConfig.SELECT_POS + right * float(g[1]) + front * float(g[2])
+		p.face_camera()
+	rig.target = null
+	rig.zoom = 3.0
+	rig.use_bounds = false
+	rig.global_position = GameConfig.SELECT_POS + Vector3(0, GameConfig.SELECT_HEIGHT, 0)
+	await get_tree().create_timer(0.3).timeout
+	var f: Rect2 = screen_layout.frame
+	var panel: float = 500.0 * screen_layout.screen.x / 1200.0
+	rig.view = Rect2(f.position + Vector2(panel, 0), f.size - Vector2(panel, 0))
+	rig._size = rig.zoom
+	rig._apply_frame()
+	await get_tree().create_timer(1.5).timeout
+	await RenderingServer.frame_post_draw
+	get_viewport().get_texture().get_image().save_png(path)
+	print("og shot ", path, " screen ", screen_layout.screen, " frame ", f, " panel ", panel)
+	get_tree().quit()
+
+
+func _run_stick_shots(dir: String) -> void:
+	## The touch stick (run with --touch): the select screen (a push to the right = next character), then play:
+	## pushes of different strength, the player's speed for each, a screenshot with the stick held.
+	_auto_shots = dir
+	await get_tree().create_timer(0.3).timeout   # the layout is made a frame after start
+	var pad: Object = screen_layout.pad
+	if not pad.visible:
+		print("stick: no touch controls (run with --touch)")
+		get_tree().quit()
+		return
+	var c: Vector2 = pad.buttons["stick"][0]
+	var travel: float = pad._travel()
+	var to_window := get_viewport().get_final_transform()   # events come in window pixels
+	var touch := func(pressed: bool, p: Vector2) -> void:
+		var ev := InputEventScreenTouch.new()
+		ev.index = 0
+		ev.position = to_window * p
+		ev.pressed = pressed
+		Input.parse_input_event(ev)
+	var drag := func(p: Vector2) -> void:
+		var ev := InputEventScreenDrag.new()
+		ev.index = 0
+		ev.position = to_window * p
+		Input.parse_input_event(ev)
+	_on_name_submitted("Тест")
+	await get_tree().create_timer(0.8).timeout
+	var before := char_idx
+	touch.call(true, c)
+	for k in 10:   # a slow push to the right: one "next character", however many drag events
+		drag.call(c + Vector2(travel * (k + 1) / 10.0, 0))
+		await get_tree().process_frame
+	await _shot("stick_1_select_right")
+	touch.call(false, c + Vector2(travel, 0))
+	print("stick: select ", before, " -> ", char_idx)
+	await get_tree().create_timer(0.3).timeout
+	await start_floor(0)
+	state = State.PLAY
+	hud.big("")
+	player.input_enabled = true
+	next_spawn = 999.0
+	for share in [0.1, 0.3, 0.5, 0.75, 1.0]:
+		player.position = spawn_pos
+		var push := Vector2(-0.6, -0.8)
+		touch.call(true, c)
+		drag.call(c + push * travel * share)
+		await get_tree().create_timer(0.5).timeout
+		print("stick: push %.2f -> speed %.2f of %.2f" % [share, player.velocity.length(), player.speed])
+		if share == 0.75:
+			await _shot("stick_2_play_held")
+		touch.call(false, c + push * travel * share)
+		await get_tree().create_timer(0.2).timeout
+	print("stick: released -> speed %.2f" % player.velocity.length())
+	await _shot("stick_3_released")
 	get_tree().quit()
 
 
@@ -1450,7 +1616,7 @@ func _run_autotest() -> void:
 			break
 	print("PASSED %d of %d floors (bot speed %.1f m/s)" % [passed, GameConfig.FLOORS.size(), _bot_speed])
 	if _physical:
-		print("PHYSICAL: %s, stuck %d times" % [GameConfig.CHARACTERS[char_idx]["id"], stuck_count])
+		print("PHYSICAL: %s, stuck %d times, footsteps %s" % [GameConfig.CHARACTERS[char_idx]["id"], stuck_count, _step_count])
 		player.bot_dir = Vector3.ZERO
 	# overload test: force everything on at the last floor
 	floor_idx = GameConfig.FLOORS.size() - 1

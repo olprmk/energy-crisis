@@ -11,6 +11,7 @@ extends Node3D
 var target: Node3D
 var frame := Rect2()        # where the game is shown in the window (layout.gd); empty = the whole window
 var screen := Vector2()     # the window's logical size
+var view := Rect2()         # the part of the frame not covered by the menu sheet (hud.gd); empty = the frame
 var use_bounds := true
 var height_offset := 0.5   # aim at the character's chest, not its feet
 var cam: Camera3D
@@ -42,15 +43,17 @@ func snap() -> void:
 
 func _apply_frame() -> void:
 	## The camera renders the whole window, but only the frame is visible: zoom out by window / frame height
-	## and shift the view so the focus sits in the middle of the frame.
-	if frame.size.y <= 0.0 or screen.y <= 0.0:
+	## and shift the view so the focus sits in the middle of the frame. With the menu sheet on screen, the
+	## same for the part of the frame the sheet leaves free (`zoom` metres fit its height).
+	var v := view if view.has_area() else frame
+	if v.size.y <= 0.0 or screen.y <= 0.0:
 		cam.size = _size
 		cam.h_offset = 0.0
 		cam.v_offset = 0.0
 		return
-	cam.size = _size * screen.y / frame.size.y   # keep_aspect = height: cam.size is the window's height
+	cam.size = _size * screen.y / v.size.y   # keep_aspect = height: cam.size is the window's height
 	var per_px := cam.size / screen.y
-	var d := frame.get_center() - screen / 2.0
+	var d := v.get_center() - screen / 2.0
 	cam.h_offset = -d.x * per_px
 	cam.v_offset = d.y * per_px
 

@@ -3,7 +3,10 @@ extends CanvasLayer
 ## All on-screen UI, following the Figma design (file "KeyLock", page "game", frames 2–5):
 ##  * pixel font Pixelify Sans, accent #FFAE00, dark text #2C1E02;
 ##  * in-game HUD drawn straight on the scene (no panels): floor + timer top-left, grid meter top-right;
-##  * white rounded cards (radius 22, padding 32) bottom-left for the menu and the results.
+##  * the menu, the name input and the results on a white sheet (Figma node 35:49): a full-height panel on the
+##    left of the game frame (desktop), a bottom sheet on a phone; it slides in from the left / from below, and
+##    where it meets the 3D view its corners are concave, so the view keeps rounded corners. The camera keeps the
+##    character in the middle of the part of the view the sheet leaves free (view_changed -> camera_rig.gd).
 
 const FONT_PATH := "res://assets/fonts/PixelifySansUA.ttf"
 const DARK := Color("2c1e02")
@@ -22,8 +25,22 @@ const FLY_RISE := 70.0               # px it rises above the appliance first
 const FLY_RISE_TIME := 0.45
 const FLY_TIME := 0.7                # then the flight to the economy label
 const FLY_END_SCALE := 0.3
+# the menu sheet (design px of the desktop mockup "620", 1280x720)
+const SHEET_W := 506.0           # desktop: width of the side panel
+const SHEET_PAD := 40.0          # desktop: padding round the content (the content is centred vertically)
+const SHEET_RADIUS := 20.0       # the concave corners (mockup px, desktop and phone)
+const SHEET_MAX_SHARE := 0.5     # the side panel never takes more than this share of the frame's width
+const SHEET_TIME := 0.5          # slide-in, s
+const SHEET_SWAP_TIME := 0.2     # another page on a sheet already shown: its content fades in
+# phone (mockup "iPhone 17 - 2", 382 px wide frame): the same content at 0.8 of the desktop size,
+# 15 px padding, ~8 px between the rows
+const SHEET_PHONE_REF := 382.0
+const SHEET_PHONE_SCALE := 0.8
+const SHEET_PHONE_PAD := 19.0    # 15 phone px in desktop units (15 / 0.8)
 
 signal name_submitted(name: String)
+## The part of the game frame (window px) that the menu sheet leaves free; the frame itself when it is hidden.
+signal view_changed(rect: Rect2)
 
 var font: FontFile
 var root: Control
@@ -56,21 +73,35 @@ var sub_lbl: Label
 var toast_lbl: Label
 var fade_rect: ColorRect
 
-# menu card
-var select_panel: PanelContainer
+# the menu sheet and its pages (one shown at a time)
+var sheet_layer: Control          # at the frame's top-left corner, window px (not scaled with the HUD)
+var sheet: Sheet
+var sheet_side := "left"          # "left" (desktop, landscape) or "bottom" (phone, portrait)
+var _pages: Array[Control] = []
+var _cur_page: Control = null         # the page on the sheet, null = hidden
+var _sheet_off := 1.0             # slide: 0 = in place, 1 = fully out
+var _sheet_tw: Tween
+var _swap_tw: Tween
+var _gaps: Array = []             # [box, desktop separation, phone separation]
+var _frame := Rect2()
+var _hud_s := 1.0
+var _view := Rect2()
+
+# menu page
+var select_panel: VBoxContainer
 var sel_name: Label
 var sel_speed: SegBar
 var sel_switch: SegBar
 
-# result card
-var result_panel: PanelContainer
+# result page
+var result_panel: VBoxContainer
 var res_stars: HBoxContainer
 var res_title: Label
 var res_lines: VBoxContainer
 var res_hints: VBoxContainer
 
-# name input card
-var name_panel: PanelContainer
+# name input page
+var name_panel: VBoxContainer
 var name_edit: LineEdit
 
 # leaderboard card
@@ -140,6 +171,42 @@ class SegBar:
 				draw_rect(r.grow(-1), color, false, 2.0)
 
 
+class Sheet:
+	## The white menu panel. side "left": the panel's right edge meets the view, so its top-right and
+	## bottom-right get concave corners outside the panel; side "bottom": its top edge meets the view (corners
+	## top-left and top-right, above the panel). The outer corners are rounded by the frame (layout.gd).
+	extends MarginContainer
+	var side := "left"
+	var radius := 20.0   # in the sheet's own units
+
+	func _draw() -> void:
+		var w := size.x
+		var h := size.y
+		draw_rect(Rect2(Vector2.ZERO, size), Color.WHITE)
+		if side == "left":
+			_fillet(Vector2(w, 0), Vector2(1, 1))
+			_fillet(Vector2(w, h), Vector2(1, -1))
+		else:
+			_fillet(Vector2(0, 0), Vector2(1, -1))
+			_fillet(Vector2(w, 0), Vector2(-1, -1))
+
+	func _fillet(p: Vector2, d: Vector2) -> void:
+		## The white piece at corner p, reaching into the view (direction d): the square p .. p + d * r without
+		## the circle centred at its far corner.
+		var r := radius
+		var c := p + d * r
+		var a0 := Vector2(0, -d.y).angle()      # from c to p + (d.x r, 0)
+		var a1 := Vector2(-d.x, 0).angle()      # from c to p + (0, d.y r)
+		var da := wrapf(a1 - a0, -PI, PI)
+		var arc := PackedVector2Array()
+		for i in 17:
+			arc.append(c + Vector2.from_angle(a0 + da * i / 16.0) * r)
+		var poly := PackedVector2Array([p])
+		poly.append_array(arc)
+		draw_colored_polygon(poly, Color.WHITE)
+		draw_polyline(arc, Color.WHITE, 1.0, true)   # smooth edge
+
+
 class Indicators:
 	## Arrows at the screen edge pointing to active appliances that are off-screen.
 	extends Control
@@ -199,6 +266,7 @@ class Indicators:
 # ======================================================================= build
 func _ready() -> void:
 	layer = 2
+	process_priority = -10   # lay the sheet out before the camera reads the free view (same frame, no lag)
 	font = load(FONT_PATH)
 	var theme := Theme.new()
 	theme.default_font = font
@@ -219,11 +287,26 @@ func _ready() -> void:
 	_build_hud()
 	_build_prompt()
 	_build_big()
+	_build_board()
+	# the sheet: above the HUD, below the fade (which now covers the whole window: outside the frame the
+	# background of layout.gd is drawn on top anyway)
+	sheet_layer = Control.new()
+	sheet_layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	sheet_layer.theme = theme
+	add_child(sheet_layer)
+	sheet = Sheet.new()
+	sheet.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	sheet.visible = false
+	sheet_layer.add_child(sheet)
 	_build_select()
 	_build_result()
 	_build_name()
-	_build_board()
-	fade_rect = _rect(Color(0, 0, 0, 0))
+	fade_rect = ColorRect.new()
+	fade_rect.color = Color(0, 0, 0, 0)
+	fade_rect.set_anchors_preset(Control.PRESET_FULL_RECT)
+	fade_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(fade_rect)
+	_apply_side()
 	_all_off()
 
 
@@ -254,6 +337,22 @@ func _box(vertical: bool, sep: int) -> BoxContainer:
 	var b: BoxContainer = VBoxContainer.new() if vertical else HBoxContainer.new()
 	b.add_theme_constant_override("separation", sep)
 	b.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	return b
+
+
+func _page(desktop_gap: int, phone_gap: int) -> VBoxContainer:
+	## A page of the sheet (menu, name input, result): centred vertically on the side panel.
+	var v: VBoxContainer = _gap(_box(true, desktop_gap), desktop_gap, phone_gap)
+	v.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	v.visible = false
+	sheet.add_child(v)
+	_pages.append(v)
+	return v
+
+
+func _gap(b: BoxContainer, desktop: int, phone: int) -> BoxContainer:
+	## Rows closer together on the phone's bottom sheet (mockup: ~8 px between the rows).
+	_gaps.append([b, desktop, phone])
 	return b
 
 
@@ -415,15 +514,11 @@ func _build_big() -> void:
 
 
 func _build_select() -> void:
-	select_panel = _card()
-	var v: VBoxContainer = _box(true, 16)
-	select_panel.add_child(v)
-	# logo + title
-	var head: HBoxContainer = _box(false, 9)
-	head.add_child(_icon(_tex("logo", Icons.svg("logo", Icons.LOGO_SVG, 32)), Vector2(32, 32)))
-	head.add_child(_label("Енергетична криза", 40, ACCENT, 2))
-	v.add_child(head)
-	var body: VBoxContainer = _box(true, 12)
+	## Mockup "620" (node 35:49): title, name + arrows, two stat bars, start hint; 426 x 217 at 40 px from the left.
+	select_panel = _page(16, 8)
+	var v := select_panel
+	v.add_child(_title_row())
+	var body: VBoxContainer = _gap(_box(true, 12), 12, 8)
 	v.add_child(body)
 	# name + arrows
 	var name_row: HBoxContainer = _box(false, 9)
@@ -442,7 +537,7 @@ func _build_select() -> void:
 	name_row.add_child(arrows_wrap)
 	body.add_child(name_row)
 	# stats + start hint
-	var lower: VBoxContainer = _box(true, 16)
+	var lower: VBoxContainer = _gap(_box(true, 16), 16, 8)
 	body.add_child(lower)
 	var stats: HBoxContainer = _box(false, 24)
 	sel_speed = SegBar.new()
@@ -454,37 +549,39 @@ func _build_select() -> void:
 		stats.add_child(col)
 	lower.add_child(stats)
 	lower.add_child(_hint_row("Enter", "щоб почати", 24, true))
-	_anchor(select_panel, BoxContainer.ALIGNMENT_END, Control.SIZE_SHRINK_BEGIN)
+
+
+func _title_row() -> HBoxContainer:
+	## Logo + "Енергетична криза" (accent, black shadow).
+	var head: HBoxContainer = _box(false, 9)
+	head.add_child(_icon(_tex("logo", Icons.svg("logo", Icons.LOGO_SVG, 32)), Vector2(32, 32)))
+	head.add_child(_label("Енергетична криза", 40, ACCENT, 2))
+	return head
 
 
 func _build_result() -> void:
-	result_panel = _card()
-	var v: VBoxContainer = _box(true, 16)
-	result_panel.add_child(v)
-	var head: VBoxContainer = _box(true, 8)
+	## Same sheet as the menu: stars, title (green / red), a few lines (wrapped to the sheet), key hints.
+	result_panel = _page(16, 8)
+	var v := result_panel
+	var head: VBoxContainer = _gap(_box(true, 8), 8, 4)
 	res_stars = _box(false, 2)
 	head.add_child(res_stars)
 	res_title = _label("Поверх пройдено!", 40, GREEN, 2)
 	head.add_child(res_title)
 	v.add_child(head)
-	res_lines = _box(true, 8)
+	res_lines = _gap(_box(true, 8), 8, 4)
 	v.add_child(res_lines)
-	res_hints = _box(true, 4)
+	res_hints = _gap(_box(true, 6), 6, 2)
 	v.add_child(res_hints)
-	_anchor(result_panel, BoxContainer.ALIGNMENT_END, Control.SIZE_SHRINK_BEGIN)
 
 
 # ======================================================================= public API
 # ======================================================================= name input + leaderboard
 func _build_name() -> void:
-	name_panel = _card()
-	var v: VBoxContainer = _box(true, 16)
-	name_panel.add_child(v)
-	var head: HBoxContainer = _box(false, 9)
-	head.add_child(_icon(_tex("logo", Icons.svg("logo", Icons.LOGO_SVG, 32)), Vector2(32, 32)))
-	head.add_child(_label("Енергетична криза", 40, ACCENT, 2))
-	v.add_child(head)
-	var body: VBoxContainer = _box(true, 8)
+	name_panel = _page(16, 8)
+	var v := name_panel
+	v.add_child(_title_row())
+	var body: VBoxContainer = _gap(_box(true, 8), 8, 6)
 	body.add_child(_label("Ім'я гравця", 24))
 	name_edit = LineEdit.new()
 	name_edit.placeholder_text = "Нікнейм"
@@ -508,7 +605,6 @@ func _build_name() -> void:
 	body.add_child(name_edit)
 	v.add_child(body)
 	v.add_child(_hint_row("Enter", "щоб продовжити", 24, true))
-	_anchor(name_panel, BoxContainer.ALIGNMENT_END, Control.SIZE_SHRINK_BEGIN)
 
 
 func _on_name_entered(text: String) -> void:
@@ -525,8 +621,8 @@ func submit_name() -> void:
 
 
 func show_name(default_name: String, leaders: Array) -> void:
-	_all_off()
-	name_panel.visible = true
+	_all_off(true)
+	_show_sheet(name_panel)
 	name_edit.text = default_name
 	name_edit.caret_column = default_name.length()
 	name_edit.grab_focus.call_deferred()
@@ -604,8 +700,8 @@ func show_leaderboard(entries: Array, player: String, title := "Рейтинг �
 
 
 func show_select(cfg: Dictionary) -> void:
-	_all_off()
-	select_panel.visible = true
+	_all_off(true)
+	_show_sheet(select_panel)
 	sel_name.text = cfg["name"]
 	sel_speed.value = clampi(roundi(remap(cfg["speed"], 2.4, 4.0, 1, 5)), 1, 5)
 	sel_switch.value = clampi(roundi(remap(cfg["switch_time"], 1.1, 0.25, 1, 5)), 1, 5)
@@ -749,20 +845,116 @@ func set_indicators(items: Array) -> void:
 
 ## The game frame (layout.gd): the HUD is laid out inside it and scaled to it (`s`), so it looks the same in a
 ## wide desktop window and in the top half of a phone screen.
-## play_boost / card_boost: on a phone the frame is small, so the play HUD (timer, load meter, prompt, toast)
-## and the result card are drawn this much larger again (the menu cards keep the mockup size).
-func set_frame(r: Rect2, s: float, play_boost := 1.0, card_boost := 1.0) -> void:
+## play_boost: on a phone the frame is small, so the play HUD (timer, load meter, prompt, toast) is drawn this
+## much larger again. side: where the menu sheet goes, "left" (landscape) or "bottom" (portrait phone).
+func set_frame(r: Rect2, s: float, play_boost := 1.0, side := "left") -> void:
 	root.set_anchors_preset(Control.PRESET_TOP_LEFT)
 	root.scale = Vector2(s, s)
 	root.position = r.position
 	root.size = r.size / s
 	# [control, extra scale, pivot as a share of its size: the corner / edge it is pinned to]
 	_boosted = [[hud_left, play_boost, Vector2(0, 0)], [hud_right, play_boost, Vector2(1, 0)],
-			[prompt_card, play_boost, Vector2(0.5, 1)], [toast_lbl, play_boost, Vector2(0.5, 0)],
-			[result_panel, card_boost, Vector2(0, 1)]]
+			[prompt_card, play_boost, Vector2(0.5, 1)], [toast_lbl, play_boost, Vector2(0.5, 0)]]
 	for b in _boosted:
 		(b[0] as Control).scale = Vector2.ONE * float(b[1])
 	_pin_boosted()
+	_frame = r
+	_hud_s = s
+	sheet_side = side
+	_apply_side()
+	_layout_sheet()
+
+
+# ======================================================================= the menu sheet
+func _apply_side() -> void:
+	var phone := sheet_side == "bottom"
+	sheet.side = sheet_side
+	var pad := SHEET_PHONE_PAD if phone else SHEET_PAD
+	for m in ["left", "right", "top", "bottom"]:
+		sheet.add_theme_constant_override("margin_" + m, int(roundf(pad)))
+	for g in _gaps:
+		(g[0] as BoxContainer).add_theme_constant_override("separation", g[2] if phone else g[1])
+
+
+## Window px of a sheet unit: desktop as the HUD (but at most SHEET_MAX_SHARE of the frame wide);
+## phone 0.8 of the mockup size, the mockup being 382 px wide.
+func _sheet_scale() -> float:
+	if sheet_side == "bottom":
+		return SHEET_PHONE_SCALE * _frame.size.x / SHEET_PHONE_REF
+	return minf(_hud_s, SHEET_MAX_SHARE * _frame.size.x / SHEET_W)
+
+
+func _layout_sheet() -> void:
+	## Size and slide position of the sheet; the free part of the frame goes to the camera.
+	var view := _frame
+	if _cur_page != null and _frame.has_area():
+		var s := _sheet_scale()
+		sheet_layer.position = _frame.position
+		sheet.scale = Vector2(s, s)
+		var r_px := SHEET_RADIUS * (_frame.size.x / SHEET_PHONE_REF if sheet_side == "bottom" else _hud_s)
+		sheet.radius = r_px / s
+		if sheet_side == "left":
+			var want := Vector2(SHEET_W, _frame.size.y / s)
+			if sheet.size != want:
+				sheet.size = want
+			var w := sheet.size.x * s
+			sheet.position = Vector2(-(w + r_px) * _sheet_off, 0.0)
+			var shown := clampf(w + sheet.position.x, 0.0, _frame.size.x * 0.9)
+			view = Rect2(_frame.position + Vector2(shown, 0.0), _frame.size - Vector2(shown, 0.0))
+		else:
+			var width := _frame.size.x / s
+			if absf(sheet.size.x - width) > 0.01:
+				sheet.size = Vector2(width, 0.0)
+			var hgt := sheet.get_combined_minimum_size().y
+			if absf(sheet.size.y - hgt) > 0.01:
+				sheet.size = Vector2(width, hgt)
+			var h := sheet.size.y * s
+			sheet.position = Vector2(0.0, _frame.size.y - h + (h + r_px) * _sheet_off)
+			var shown := clampf(_frame.size.y - sheet.position.y, 0.0, _frame.size.y * 0.9)
+			view = Rect2(_frame.position, _frame.size - Vector2(0.0, shown))
+		sheet.queue_redraw()
+	if view != _view:
+		_view = view
+		view_changed.emit(view)
+
+
+func _show_sheet(page: Control) -> void:
+	## Put `page` on the sheet: slides the sheet in if it was hidden, otherwise fades the new page in.
+	var was_shown := _cur_page != null
+	if page != _cur_page:
+		for p in _pages:
+			p.visible = p == page
+		if was_shown:
+			page.modulate.a = 0.0
+			if _swap_tw and _swap_tw.is_valid():
+				_swap_tw.kill()
+			_swap_tw = create_tween()
+			_swap_tw.tween_property(page, "modulate:a", 1.0, SHEET_SWAP_TIME)
+		else:
+			page.modulate.a = 1.0
+	_cur_page = page
+	sheet.visible = true
+	if not was_shown:
+		_sheet_off = 1.0
+		if _sheet_tw and _sheet_tw.is_valid():
+			_sheet_tw.kill()
+		_sheet_tw = create_tween()
+		_sheet_tw.tween_property(self, "_sheet_off", 0.0, SHEET_TIME) \
+				.set_trans(Tween.TRANS_QUART).set_ease(Tween.EASE_OUT)
+	_layout_sheet()
+
+
+func hide_sheet() -> void:
+	if _sheet_tw and _sheet_tw.is_valid():
+		_sheet_tw.kill()
+	_cur_page = null
+	_sheet_off = 1.0
+	sheet.visible = false
+	for p in _pages:
+		p.visible = false
+	if name_edit:
+		name_edit.release_focus()
+	_layout_sheet()
 
 
 func _pin_boosted() -> void:
@@ -781,9 +973,10 @@ func show_result(win: bool, title: String, lines: Array, stars: int, hints: Arra
 	prompt_card.visible = false
 	set_indicators([])
 	big("")
-	# design: passed -> clean scene; failed -> dimmed scene + white grid meter
+	# design: passed -> clean scene; failed -> dimmed scene + white grid meter (not on a phone: the view
+	# above the bottom sheet is small)
 	hud_left.visible = false
-	hud_right.visible = not win
+	hud_right.visible = not win and sheet_side == "left"
 	set_hud_light(not win)
 	dim_rect.color.a = 0.0 if win else 0.45
 	for c in res_stars.get_children():
@@ -799,12 +992,14 @@ func show_result(win: bool, title: String, lines: Array, stars: int, hints: Arra
 	for c in res_lines.get_children():
 		c.queue_free()
 	for l in lines:
-		res_lines.add_child(_label(l, 16))
+		var lbl := _label(l, 20)
+		lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART   # long lines wrap to the sheet's width
+		res_lines.add_child(lbl)
 	for c in res_hints.get_children():
 		c.queue_free()
 	for h in hints:
-		res_hints.add_child(_hint_row(h[0], h[1], 16, h.size() > 2 and h[2]))
-	result_panel.visible = true
+		res_hints.add_child(_hint_row(h[0], h[1], 20, h.size() > 2 and h[2]))
+	_show_sheet(result_panel)
 
 
 func fade_to(alpha: float, time := 0.35) -> void:
@@ -813,12 +1008,15 @@ func fade_to(alpha: float, time := 0.35) -> void:
 	await tw.finished
 
 
-func _all_off() -> void:
+func _all_off(keep_sheet := false) -> void:
+	## Hide everything; keep_sheet: the next screen is a sheet page too (it changes pages without sliding out).
 	_clear_flyers()
 	if name_edit:
 		name_edit.release_focus()
-	for c in [hud_left, hud_right, prompt_card, select_panel, result_panel, name_panel, board_panel]:
+	for c in [hud_left, hud_right, prompt_card, board_panel]:
 		c.visible = false
+	if not keep_sheet:
+		hide_sheet()
 	dim_rect.color.a = 0.0
 	set_indicators([])
 	big("")
@@ -826,6 +1024,7 @@ func _all_off() -> void:
 
 func _process(delta: float) -> void:
 	_pin_boosted()   # their sizes change with the text
+	_layout_sheet()  # slide animation, text changes
 	if _toast_t > 0.0:
 		_toast_t -= delta
 		toast_lbl.modulate.a = clampf(_toast_t / 0.5, 0.0, 1.0)

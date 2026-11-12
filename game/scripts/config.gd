@@ -21,10 +21,16 @@ const FIRST_SPAWN := 1.5
 ## Camera: orthographic size = how many metres fit vertically on screen (smaller = closer).
 const CAMERA_ZOOM := 4.5
 const SELECT_ZOOM := 2.6
+const SELECT_ZOOM_PHONE := 1.9   # the same on a phone: the view above the bottom sheet is low, so a closer look
 const SELECT_POS := Vector3(2.1, 0.0, -2.5)   # where the character stands on the select screen (living room)
 const SELECT_HEIGHT := 0.6                     # camera aim height on the select / result screens (character centred)
 const ZOOM_MIN := 3.0
 const ZOOM_MAX := 8.0
+
+## Lighting in the Compatibility renderer (web browsers, old GPUs): it has no HDR, so with the desktop values the
+## picture is washed out to white. These look like the desktop (Forward+) version: no glow, a much weaker sun,
+## less ambient light, lamps (OmniLight) at 30%, the background colour as it comes out after the desktop's tonemapping.
+const COMPAT_LIGHTING := {"glow": false, "sun": 0.33, "ambient": 0.27, "lamps": 0.3, "background": "4f6f7b"}
 
 ## Window: base resolution (logical pixels). On Retina/HiDPI screens the window is scaled up.
 const WINDOW_SIZE := Vector2i(1280, 720)
@@ -34,16 +40,17 @@ const BACKGROUND_COLOR := Color("e5ecee")
 const FRAME_MARGIN := 0.025       # gap round the frame: share of the window's shorter side (10 px on a phone)
 const FRAME_RADIUS := 0.031       # corner radius: share of the frame's shorter side
 const UI_REF_SIZE := Vector2(812, 720)   # the HUD is scaled so this much of it fits into the frame
-## Touch controls (d-pad + two buttons): "auto" = in portrait, and on touch screens in landscape too;
+## Touch controls (analog stick + two buttons): "auto" = in portrait, and on touch screens in landscape too;
 ## "always" / "never".
 const TOUCH_CONTROLS := "auto"
 ## Names on the two round buttons (mockup: pixel "0" and "X"). On touch screens the hints name these buttons
 ## instead of the keys: "0" for Enter / Space (start, switch off, next), "X" for Esc (back).
 const TOUCH_BUTTONS := {"a": "0", "b": "X"}
-## On a phone the frame is small: the play HUD and the result card are drawn larger (play HUD, result card).
-const TOUCH_HUD_BOOST := {"portrait": [1.6, 1.3], "landscape_touch": [1.4, 1.0]}
+## On a phone the frame is small: the play HUD (timer, grid meter, prompt, toast) is drawn this much larger.
+## (The menu / result sheet has its own size: hud.gd, SHEET_*.)
+const TOUCH_HUD_BOOST := {"portrait": 1.6, "landscape_touch": 1.4}
 const TOUCH_LAYOUT := {   # mockup sizes, px on a 402 px wide phone
-	"ref_width": 402.0, "side": 24.0, "dpad": 116.0, "button": 60.0,
+	"ref_width": 402.0, "side": 24.0, "stick": 116.0, "button": 60.0,
 	"gap": 90.0,          # from the frame down to the controls
 	"bottom": 24.0,       # least room left under them
 	"button_drop": 56.0,  # the second button sits this much lower than the first
@@ -114,17 +121,23 @@ const APPLIANCE_UNLOCK := {
 	"heater": 7, "stove": 8, "washer": 9, "boiler": 10,
 }
 
+## Footsteps: "steps" = sound set (assets/sounds/steps/<steps>_<wood|tile>_<n>.wav: barefoot, paws, slippers,
+## sneakers), "step_phases" = moments of the walk animation (0..1) when a foot touches the floor (taken from the
+## animations: people step at 13% and 59% of the cycle; the dog's front and back paws land in pairs),
+## "step_gains" = extra dB per step (the dog's back paws are softer). The floor of the room decides wood or tile.
+const STEP_VOLUME_DB := -2.0
 const CHARACTERS := [
 	{"id": "mother", "name": "Джоан", "role": "Мати", "file": "res://assets/models/characters/mother.glb",
-	 "speed": 3.0, "switch_time": 0.6, "radius": 0.22,
+	 "speed": 3.0, "switch_time": 0.6, "radius": 0.22, "steps": "barefoot", "step_phases": [0.13, 0.59],
 	 "desc": "Збалансована: середня швидкість і швидке вимикання."},
 	{"id": "dog", "name": "Рекс", "role": "Собака", "file": "res://assets/models/characters/dog.glb",
-	 "speed": 3.8, "switch_time": 1.0, "radius": 0.3,
+	 "speed": 3.8, "switch_time": 1.0, "radius": 0.3, "steps": "paws", "step_phases": [0.97, 0.03, 0.47, 0.53],
+	 "step_gains": [0.0, -4.0, 0.0, -4.0],
 	 "desc": "Найшвидший, але вимикає прилад довше — тягне носом."},
 	{"id": "father", "name": "Алекс", "role": "Батько", "file": "res://assets/models/characters/father.glb",
-	 "speed": 2.6, "switch_time": 0.3, "radius": 0.22,
+	 "speed": 2.6, "switch_time": 0.3, "radius": 0.22, "steps": "slippers", "step_phases": [0.13, 0.59],
 	 "desc": "Повільніший, зате вимикає миттєво."},
 	{"id": "child", "name": "Ніка", "role": "Донька", "file": "res://assets/models/characters/child.glb",
-	 "speed": 3.4, "switch_time": 0.7, "radius": 0.2,
+	 "speed": 3.4, "switch_time": 0.7, "radius": 0.2, "steps": "sneakers", "step_phases": [0.13, 0.59],
 	 "desc": "Швидкий і маленький — легко пробігає між меблями."},
 ]
