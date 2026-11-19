@@ -133,7 +133,8 @@ func _ready() -> void:
 	var demo := false   # screenshot / test runs use a separate save file
 	for a in args:
 		if a.begins_with("--ui-shots=") or a.begins_with("--floor-shots=") or a.begins_with("--stick-shots=") \
-				or a.begins_with("--og-shot=") or a.begins_with("--fx-shots=") or a == "--autotest":
+				or a.begins_with("--og-shot=") or a.begins_with("--fx-shots=") or a.begins_with("--play-shots=") \
+				or a == "--autotest":
 			demo = true
 	_demo = demo
 	save = preload("res://scripts/save_data.gd").new("user://save_demo.json" if demo else "user://save.json",
@@ -170,6 +171,9 @@ func _ready() -> void:
 		if arg.begins_with("--fx-shots="):
 			_run_fx_shots(arg.substr(11))
 			return
+		if arg.begins_with("--play-shots="):
+			_run_play_shots(arg.substr(13))
+			return
 	if autotest:
 		_run_autotest()
 
@@ -196,11 +200,12 @@ func _setup_window() -> void:
 func _on_layout_changed(frame: Rect2) -> void:
 	## Window resized / rotated: the HUD, the camera and the noise effect follow the game frame.
 	hud.set_touch_keys(screen_layout.touch_hints)
-	var boost: float = GameConfig.TOUCH_HUD_BOOST.get(screen_layout.mode, 1.0)
+	hud.pad = screen_layout.pad
 	rig.frame = frame
 	if state in [State.START, State.RESULT]:
 		rig.zoom = _menu_zoom()   # turned between portrait and landscape on a menu screen
-	hud.set_frame(frame, screen_layout.hud_scale, boost, "bottom" if screen_layout.mode == "portrait" else "left")
+	hud.set_frame(frame, screen_layout.hud_scale, screen_layout.mode, screen_layout.unit, screen_layout.area,
+			screen_layout.screen)
 	rig.screen = screen_layout.screen
 	rig.snap()
 	fx.set_frame(frame)
@@ -1366,7 +1371,7 @@ func _run_stick_shots(dir: String) -> void:
 	_auto_shots = dir
 	await get_tree().create_timer(0.3).timeout   # the layout is made a frame after start
 	var pad: Object = screen_layout.pad
-	if not pad.visible:
+	if pad.buttons.is_empty():
 		print("stick: no touch controls (run with --touch)")
 		get_tree().quit()
 		return
@@ -1404,6 +1409,98 @@ func _run_stick_shots(dir: String) -> void:
 		await get_tree().create_timer(0.2).timeout
 	print("stick: released -> speed %.2f" % player.velocity.length())
 	await _shot("stick_3_released")
+	get_tree().quit()
+
+
+func _run_play_shots(dir: String) -> void:
+	## Pictures of a game in progress (for store pages; on a phone: run with --touch in a phone-sized window, either
+	## orientation): a floor in play with appliances on (halo, "!", rings), the load meter nearing the limit, the
+	## child running with the stick held; then a switch-off (sparks, the power flying to the meter).
+	## --shot-floor=N picks the floor (default 1).
+	_auto_shots = dir
+	var floor_i := 0
+	for a in OS.get_cmdline_user_args():
+		if a.begins_with("--shot-floor="):
+			floor_i = maxi(int(a.substr(13)) - 1, 0)
+	await get_tree().create_timer(0.5).timeout
+	start_floor(floor_i)
+	while state != State.PLAY:
+		await get_tree().process_frame
+	next_spawn = 999.0
+	# appliances on, nearest to the player first, while the load stays under the flicker (meter orange, ~75 %)
+	var limit_w: float = float(_cfg()["limit_kw"]) * 1000.0
+	var load_w := 0.0
+	for a in apps:
+		if a.is_on:
+			load_w += a.power   # the fridge
+	var near := player.global_position
+	var list := apps.filter(func(a: Appliance) -> bool: return not a.is_on and not a.never_off)
+	list.sort_custom(func(a: Appliance, b: Appliance) -> bool: return a.pos.distance_to(near) < b.pos.distance_to(near))
+	var on: Array[Appliance] = []
+	for a: Appliance in list:
+		if on.size() >= 4:
+			break
+		if load_w + a.power <= limit_w * GameConfig.FLICKER_FROM * 0.97:
+			a.set_on(true, t)
+			potential_rate_w += a.power
+			load_w += a.power
+			on.append(a)
+	print("play shots: floor %d, on %s, load %.0f of %.0f W" % [floor_i + 1, on.map(func(a): return a.id), load_w, limit_w])
+	if on.is_empty():
+		get_tree().quit()
+		return
+	await get_tree().create_timer(1.2).timeout
+	# the biggest one on is the one switched off later; first the child runs from it towards the camera (down the
+	# screen, so it faces us) with the stick held
+	var target: Appliance = on[0]
+	for a: Appliance in on:
+		if a.power > target.power:
+			target = a
+	player.global_position = Vector3(target.interact.x, player.global_position.y, target.interact.z)
+	player.velocity = Vector3.ZERO
+	await get_tree().create_timer(1.0).timeout
+	var dir2 := Vector2(0.45, 0.89)
+	var pad: Object = screen_layout.pad
+	var to_window := get_viewport().get_final_transform()
+	if pad and pad.visible:
+		var c: Vector2 = pad.buttons["stick"][0]
+		var travel: float = pad._travel()
+		var ev := InputEventScreenTouch.new()
+		ev.index = 0
+		ev.position = to_window * c
+		ev.pressed = true
+		Input.parse_input_event(ev)
+		var dr := InputEventScreenDrag.new()
+		dr.index = 0
+		dr.position = to_window * (c + dir2 * travel * 0.9)
+		Input.parse_input_event(dr)
+		await get_tree().create_timer(0.4).timeout
+		await _shot("play_1_run")
+		ev = InputEventScreenTouch.new()
+		ev.index = 0
+		ev.position = to_window * c
+		ev.pressed = false
+		Input.parse_input_event(ev)
+	else:
+		await _shot("play_1_run")
+	# switch it off: sparks and the power flying to the meter
+	player.global_position = Vector3(target.interact.x, player.global_position.y, target.interact.z)
+	player.velocity = Vector3.ZERO
+	await get_tree().create_timer(0.9).timeout
+	_try_interact()
+	while switched == 0:
+		await get_tree().process_frame
+	await get_tree().create_timer(0.12).timeout
+	await _shot("play_2_switch")
+	await get_tree().create_timer(0.35).timeout
+	await _shot("play_3_fly")
+	# next to another one that is on: the prompt names the key (on a phone: the button's picture)
+	for a: Appliance in on:
+		if a != target and a.is_on:
+			player.global_position = Vector3(a.interact.x, player.global_position.y, a.interact.z)
+			break
+	await get_tree().create_timer(1.0).timeout
+	await _shot("play_4_prompt")
 	get_tree().quit()
 
 

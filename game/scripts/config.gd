@@ -46,20 +46,24 @@ const BACKGROUND_COLOR := Color("e5ecee")
 const FRAME_MARGIN := 0.0         # gap round the frame: share of the window's shorter side
 const FRAME_RADIUS := 0.0         # corner radius: share of the frame's shorter side
 const UI_REF_SIZE := Vector2(812, 720)   # the HUD is scaled so this much of it fits into the frame
-## Touch controls (analog stick + two buttons): "auto" = in portrait, and on touch screens in landscape too;
-## "always" / "never".
+## Touch controls (analog stick + the switch-off button): "auto" = in portrait, and on touch screens in landscape
+## too; "always" / "never".
 const TOUCH_CONTROLS := "auto"
-## Names on the two round buttons (mockup: pixel "0" and "X"). On touch screens the hints name these buttons
-## instead of the keys: "0" for Enter / Space (start, switch off, next), "X" for Esc (back).
-const TOUCH_BUTTONS := {"a": "0", "b": "X"}
-## On a phone the frame is small: the play HUD (timer, grid meter, prompt, toast) is drawn this much larger.
-## (The menu / result sheet has its own size: hud.gd, SHEET_*.)
-const TOUCH_HUD_BOOST := {"portrait": 1.6, "landscape_touch": 1.4}
-const TOUCH_LAYOUT := {   # mockup sizes, px on a 402 px wide phone
-	"ref_width": 402.0, "side": 24.0, "stick": 116.0, "button": 60.0,
-	"gap": 90.0,          # from the frame down to the controls
-	"bottom": 24.0,       # least room left under them
-	"button_drop": 56.0,  # the second button sits this much lower than the first
+## Phones (Figma "KeyLock" 56:1162, an iPhone 17: 402 x 874 pt). Sizes in pt; on screen 1 pt = the window's width
+## (portrait) or height (landscape) / 402.
+##   * portrait: the game view on top, the controls panel at the bottom (gradient, rounded top corners) with the
+##     stick on the left and the switch-off button on the right;
+##   * landscape: the game fills the screen, the stick at the bottom left, the button at the bottom right.
+const PHONE := {
+	"ref": 402.0,
+	"panel": 376.0,           # portrait: the controls panel's height
+	"panel_overlap": 31.0,    # ... it covers this much of the game view's bottom edge
+	"panel_radius": 30.0,     # its top corners
+	"stick_r": 70.0,          # the stick's base; its knob (and the button) are 70 pt coins
+	"coin_r": 35.0,
+	"stick_c": Vector2(110, 110),          # portrait: from the panel's top left; landscape: from the bottom left
+	"button_c": Vector2(325, 110),         # portrait: from the panel's top left
+	"button_c_land": Vector2(110, 110),    # landscape: from the bottom right
 }
 
 ## Background music (assets/music/calm|tension|urgent .ogg): volume of the Music bus, M toggles it in game.

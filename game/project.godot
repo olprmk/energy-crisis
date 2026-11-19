@@ -14,9 +14,9 @@ config/name="Енергетична криза"
 config/description="Навчальна гра про економію електроенергії"
 run/main_scene="res://scenes/main.tscn"
 config/features=PackedStringArray("4.7", "Forward Plus")
-boot_splash/bg_color=Color(0.8980392, 0.9254902, 0.93333334, 1)
-boot_splash/stretch_mode=0
-boot_splash/image="res://assets/ui/splash_logo.png"
+boot_splash/bg_color=Color(0.88235295, 0.94509804, 0.9647059, 1)
+boot_splash/stretch_mode=4
+boot_splash/image="res://assets/ui/splash_load.png"
 config/icon="res://assets/ui/icon.png"
 
 [audio]

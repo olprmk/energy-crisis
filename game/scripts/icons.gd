@@ -119,6 +119,14 @@ const HINT_ARROW_EDGE_SVG := """<svg width="66.9669" height="41.9605" viewBox="-
 const HINT_ARROW_SIZE := Vector2(62.0, 37.46)
 const HINT_ARROW_PAD := 2.0 * 62.0 / 62.9669
 
+## The phone's switch-off button in the prompts ("Press [button] to switch off: ..."): the orange coin and the
+## power sign (layout.gd draws the real button).
+const POWER_COIN_SVG := """<svg width="32" height="32" viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg">
+<circle cx="16" cy="16" r="15.5" fill="#EAAA3C"/>
+<path d="M22.14 12.70 A7.5 7.5 0 1 1 9.86 12.70" stroke="#000" stroke-width="3" fill="none" stroke-linecap="round"/>
+<path d="M16 8.2 V14.2" stroke="#000" stroke-width="3" stroke-linecap="round"/>
+</svg>"""
+
 const ARROW_LEFT := [Vector2(0, 4), Vector2(2, 6), Vector2(2, 4), Vector2(4, 4), Vector2(6, 4), Vector2(8, 4), Vector2(4, 8), Vector2(2, 2), Vector2(4, 0)]
 const ARROW_RIGHT := [Vector2(8, 4), Vector2(6, 2), Vector2(6, 4), Vector2(4, 4), Vector2(2, 4), Vector2(0, 4), Vector2(4, 0), Vector2(6, 6), Vector2(4, 8)]
 const ENTER := [Vector2(0, 6), Vector2(2, 8), Vector2(2, 6), Vector2(4, 6), Vector2(6, 6), Vector2(7, 5), Vector2(8, 2), Vector2(8, 0), Vector2(2, 4), Vector2(1, 5), Vector2(1, 7), Vector2(8, 4)]

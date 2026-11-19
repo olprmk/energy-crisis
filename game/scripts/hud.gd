@@ -5,7 +5,8 @@ extends CanvasLayer
 ##  * the start and result screens on a side panel (500 x 720 design px, light blue gradient #EAF2F4 -> #D7F0F7,
 ##    40 px padding): at the top the logo and "Energy Crisis" (or the stars and Success / Fail with the energy
 ##    used and the savings), at the bottom the floor to play and big buttons (420 x 70, radius 20; orange =
-##    the main action, grey = start the game over). On a phone (portrait) the panel is a bottom sheet;
+##    the main action, grey = start the game over). On a phone (Figma 56:1162) these are full-screen pages
+##    instead: a column in portrait, two columns in landscape, the title picture on the start page;
 ##  * in play: "Floor N" top left (white, bold, black shadow) and the grid load meter top right (260 x 26: white,
 ##    green fill, a bolt, the load in per cent of the limit); the countdown numbers and "Start" in the middle
 ##    (90 px, orange, 6 px black shadow);
@@ -67,6 +68,42 @@ var toast_lbl: Label
 var fade_rect: ColorRect
 var _boosted: Array = []
 var touch_keys := false   # a touch screen: the prompt names the on-screen button instead of the key
+var pad                   # layout.gd's TouchPad (phones): its hints, and it is off under a menu page
+var _floor_mc: MarginContainer
+var _meter_mc: MarginContainer
+var _prompt_mc: MarginContainer
+var _prompt_src := ""
+var _prompt_img := 26
+var _fly_boost := 1.0             # phones: the flying power number in pt (22 pt)
+
+# phones: full-screen menu pages laid out in pt of the mockup's 402 pt phone (PH_*)
+const PH_W := 362.0               # buttons and rows
+const PH_ART_W := 187.0           # the title picture (logo + "ENERGY CRISIS")
+var phone_mode := ""              # "" (desktop), "portrait" or "landscape"
+var _pu := 1.0                    # window px per pt
+var _area := Rect2()              # the safe part of the window
+var _screen := Vector2()
+var phone_canvas: CanvasLayer
+var phone_bg: Sheet
+var phone_root: Control
+var ph_start: Control
+var ph_art: TextureRect
+var ph_start_floor: HBoxContainer
+var ph_start_floor_val: Label
+var ph_start_btn: Array = []      # [main, second]
+var ph_result: Control
+var ph_stars: HBoxContainer
+var ph_title: Label
+var ph_rows: VBoxContainer
+var ph_used: Label
+var ph_econ: Label
+var ph_res_floor: HBoxContainer
+var ph_res_floor_val: Label
+var ph_res_btn: Array = []
+var _ph_page: Control = null
+var _desk_page: Control = null    # the desktop page that goes with the phone page shown (turning the phone)
+var _ph_returning := false        # the start page with a floor to continue from
+var _ph_win := true
 
 # the panel and its pages (one shown at a time)
 var sheet_layer: Control          # at the frame's top-left corner, window px (not scaled with the HUD)
@@ -112,31 +149,44 @@ class LoadMeter:
 	var frac := 0.0
 	var font: Font
 	var bolt: Texture2D = Icons.svg_scaled("hud_bolt", Icons.HUD_BOLT_SVG, 4.0)
+	var zoom := 1.0   # drawn this much larger (phones)
 	const W := 260.0
 	const H := 26.0
 	func _init() -> void:
 		custom_minimum_size = Vector2(W, H)
 		mouse_filter = Control.MOUSE_FILTER_IGNORE
+	func set_zoom(z: float) -> void:
+		zoom = z
+		custom_minimum_size = Vector2(W, H) * z
+		queue_redraw()
 	func _draw() -> void:
-		draw_rect(Rect2(Vector2.ZERO, size), Color.WHITE)
+		draw_set_transform(Vector2.ZERO, 0.0, Vector2(zoom, zoom))
+		var sz := Vector2(W, H)
+		draw_rect(Rect2(Vector2.ZERO, sz), Color.WHITE)
 		var f := clampf(frac, 0.0, 1.0)
 		var fill := Hud.BAR_GREEN if frac < 0.7 else (Hud.ACCENT if frac <= 1.0 else Hud.RED)
 		if f > 0.0:
-			draw_rect(Rect2(0, 0, size.x * f, size.y), fill)
+			draw_rect(Rect2(0, 0, sz.x * f, sz.y), fill)
 		if bolt:
 			draw_texture_rect(bolt, Rect2(5.95, 4.63, 14.05, 15.75), false)
 		var text := "%d%%" % roundi(frac * 100.0)
 		var fs := 24
-		var base := (size.y + font.get_ascent(fs) - font.get_descent(fs)) * 0.5
-		draw_string(font, Vector2(0, base), text, HORIZONTAL_ALIGNMENT_RIGHT, size.x - 5.0, fs, Hud.DARK)
+		var base := (sz.y + font.get_ascent(fs) - font.get_descent(fs)) * 0.5
+		draw_string(font, Vector2(0, base), text, HORIZONTAL_ALIGNMENT_RIGHT, sz.x - 5.0, fs, Hud.DARK)
 
 
 class Controls:
 	## The controls shown when a game starts (Figma "Control"): W A S D at the bottom left with "Control" and an
 	## arrow, the space bar in the middle with "Turn off" and an arrow. A key held down is drawn darker.
+	## Above the keys, what to do (GOAL). On a touch screen only the goal (the stick and buttons are its own).
 	extends Control
 	var font: Font
 	var font_bold: Font
+	var keys := true          # draw the keys (false on a touch screen)
+	const GOAL := ["Turn off appliances", "to prevent power", "surges."]
+	const GOAL_SIZE := 44     # Pixelify Sans, regular, white
+	const GOAL_LINE := 40.0   # line to line
+	const GOAL_SHADOW := Vector2(3, 3)   # hard black shadow
 	var arrow: Texture2D = Icons.svg_scaled("hint_arrow", Icons.HINT_ARROW_SVG, 4.0)
 	var arrow_edge: Texture2D = Icons.svg_scaled("hint_arrow_edge", Icons.HINT_ARROW_EDGE_SVG, 4.0)
 	var key_style := StyleBoxFlat.new()
@@ -167,11 +217,21 @@ class Controls:
 		var r := Rect2(arrow_at - Vector2(pad, pad), Icons.HINT_ARROW_SIZE + Vector2(pad, pad) * 2.0)
 		draw_texture_rect(arrow_edge, r, false, Color(1, 1, 1, 0.55))
 		draw_texture_rect(arrow, r, false)
+	func _goal(last_base: float) -> void:
+		## The goal in three lines, the last one's baseline at last_base.
+		for i in GOAL.size():
+			var b := Vector2(40.0, last_base - GOAL_LINE * (GOAL.size() - 1 - i))
+			draw_string(font, b + GOAL_SHADOW, GOAL[i], HORIZONTAL_ALIGNMENT_LEFT, -1, GOAL_SIZE, Color.BLACK)
+			draw_string(font, b, GOAL[i], HORIZONTAL_ALIGNMENT_LEFT, -1, GOAL_SIZE, Color.WHITE)
 	func _draw() -> void:
 		var h := size.y
 		var x0 := 40.0
 		var y1 := h - 40.0 - KEY            # the lower row (A S D, space bar)
 		var y0 := y1 - GAP - KEY            # W
+		if not keys:
+			_goal(h - 48.0)                 # a touch screen: at the bottom left of the view
+			return
+		_goal(y0 - 63.0)                    # mockup: the last line's baseline 63 px above the W key
 		_key(Rect2(x0 + KEY + GAP, y0, KEY, KEY), "W", Input.is_action_pressed("move_up"))
 		_key(Rect2(x0, y1, KEY, KEY), "A", Input.is_action_pressed("move_left"))
 		_key(Rect2(x0 + KEY + GAP, y1, KEY, KEY), "S", Input.is_action_pressed("move_down"))
@@ -294,11 +354,27 @@ func _ready() -> void:
 	sheet_layer.add_child(sheet)
 	_build_start()
 	_build_result()
+	# phones: the menu pages over everything (the controls panel and the stick too)
+	phone_canvas = CanvasLayer.new()
+	phone_canvas.layer = 101
+	phone_canvas.visible = false
+	add_child(phone_canvas)
+	phone_bg = Sheet.new()
+	phone_bg.mouse_filter = Control.MOUSE_FILTER_STOP   # nothing under the page takes the taps
+	phone_canvas.add_child(phone_bg)
+	phone_root = Control.new()
+	phone_root.theme = theme
+	phone_root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	phone_canvas.add_child(phone_root)
+	_build_phone()
+	var fade_layer := CanvasLayer.new()
+	fade_layer.layer = 102   # the fade covers everything, phone pages included
+	add_child(fade_layer)
 	fade_rect = ColorRect.new()
 	fade_rect.color = Color(0, 0, 0, 0)
 	fade_rect.set_anchors_preset(Control.PRESET_FULL_RECT)
 	fade_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	add_child(fade_rect)
+	fade_layer.add_child(fade_rect)
 	_apply_side()
 	_all_off()
 
@@ -496,16 +572,174 @@ func _build_result() -> void:
 	result_panel.add_child(bottom)
 
 
+func _build_phone() -> void:
+	## Phone pages (Figma 56:1162): the start page (the title picture, the floor, Start / Restart game) and the
+	## result page (stars, Success / Fail, energy used, savings, the floor, the buttons). Placed by _layout_phone.
+	ph_start = _ph_page_node()
+	ph_art = _icon(_title_art(), Vector2.ZERO)
+	ph_start.add_child(ph_art)
+	ph_start_floor_val = _label("2", 28)
+	ph_start_floor = _row("Floor", ph_start_floor_val)
+	ph_start.add_child(ph_start_floor)
+	ph_start_btn = [_ph_button(), _ph_button()]
+	for b in ph_start_btn:
+		ph_start.add_child(b)
+	ph_result = _ph_page_node()
+	ph_stars = _box(false, 0)
+	ph_result.add_child(ph_stars)
+	ph_title = _label("Success", 60, GREEN, 2, true)
+	_leading(ph_title, 60, 0.9, true)
+	ph_result.add_child(ph_title)
+	ph_rows = _box(true, 8)
+	ph_used = _label("", 28)
+	ph_econ = _label("", 28)
+	ph_rows.add_child(_row("Consumed:", ph_used))
+	ph_rows.add_child(_row("Savings", ph_econ))
+	ph_result.add_child(ph_rows)
+	ph_res_floor_val = _label("1", 28)
+	ph_res_floor = _row("Floor", ph_res_floor_val)
+	ph_result.add_child(ph_res_floor)
+	ph_res_btn = [_ph_button(), _ph_button()]
+	for b in ph_res_btn:
+		ph_result.add_child(b)
+
+
+func _ph_page_node() -> Control:
+	var c := Control.new()
+	c.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	c.visible = false
+	phone_root.add_child(c)
+	return c
+
+
+func _ph_button() -> PanelContainer:
+	## A phone page button (362 x 70 pt); its text, colour and action are set by _ph_set.
+	var b := _button("", true, "")
+	for c in b.get_signal_connection_list("gui_input"):
+		b.gui_input.disconnect(c["callable"])
+	_clickable(b, func() -> void: press_action(str(b.get_meta("action", "confirm"))))
+	return b
+
+
+func _ph_set(b: PanelContainer, spec: Array) -> void:
+	## spec: [text, primary, action] (as in _set_buttons); empty = hidden.
+	b.visible = not spec.is_empty()
+	if spec.is_empty():
+		return
+	(b.get_child(0) as Label).text = spec[0]
+	(b.get_theme_stylebox("panel") as StyleBoxFlat).bg_color = ACCENT if spec[1] else BTN_GREY
+	b.set_meta("action", spec[2])
+
+
+func _title_art() -> Texture2D:
+	## Logo + "ENERGY CRISIS" (Figma "load game"): cut from the loading picture (assets/ui/splash_load.png, the
+	## 1280 x 720 frame at 3x: the logo 80 px and the title 220 px wide in its middle).
+	var t := AtlasTexture.new()
+	t.atlas = load("res://assets/ui/splash_load.png")
+	t.region = Rect2(1587, 723, 666, 615)
+	return t
+
+
+func _place(c: Control, pos: Vector2, size := Vector2(-1, -1)) -> void:
+	c.position = pos
+	if size.x >= 0.0:
+		c.size = size
+
+
+func _layout_phone() -> void:
+	## Phone pages, in pt (the mockup: 402 x 874 portrait, 874 x 402 landscape). Portrait: a column, the vertical
+	## places following the phone's height; landscape: the left and right columns 40 pt from the sides.
+	if phone_mode == "" or _pu <= 0.0:
+		return
+	var W := _area.size.x / _pu
+	var H := _area.size.y / _pu
+	phone_bg.position = Vector2.ZERO
+	phone_bg.size = _screen
+	phone_bg.queue_redraw()
+	phone_root.position = _area.position
+	phone_root.scale = Vector2(_pu, _pu)
+	phone_root.size = Vector2(W, H)
+	for page in [ph_start, ph_result]:
+		page.position = Vector2.ZERO
+		page.size = Vector2(W, H)
+	var art := Vector2(PH_ART_W, PH_ART_W * 615.0 / 666.0)
+	var btn := Vector2(PH_W, 70)
+	var row := Vector2(PH_W, 34)
+	if phone_mode == "portrait":
+		var vy := H / 874.0
+		var bottom := H - 148.0 * vy                 # the buttons' bottom edge
+		# start: the picture, then (a player coming back) the floor, Start, Restart game
+		_place(ph_art, Vector2((W - art.x) * 0.5, 228.0 * vy), art)
+		if _ph_returning:
+			_place(ph_start_floor, Vector2(20, bottom - 156.0 - 58.0), row)
+			_place(ph_start_btn[0], Vector2(20, bottom - 156.0), btn)
+			_place(ph_start_btn[1], Vector2(20, bottom - 70.0), btn)
+		else:
+			_place(ph_start_btn[0], Vector2(20, bottom - 70.0), btn)
+		# result: stars and the title in the middle, the rows, the floor (fail), the buttons
+		_place(ph_stars, Vector2((W - 150.0) * 0.5, 145.0 * vy))
+		ph_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		_place(ph_title, Vector2(20, 215.0 * vy), Vector2(PH_W, 54))
+		_place(ph_rows, Vector2(20, 324.0 * vy), Vector2(PH_W, 76))
+		_place(ph_res_floor, Vector2(20, bottom - 156.0 - 58.0), row)
+		_place(ph_res_btn[0], Vector2(20, bottom - 156.0), btn)
+		_place(ph_res_btn[1], Vector2(20, bottom - 70.0), btn)
+	else:
+		var right := W - 40.0 - PH_W
+		var low := H - 40.0 - 70.0                   # the buttons' top
+		if _ph_returning:   # the picture higher; Restart game left, Start right, the floor above Start
+			_place(ph_art, Vector2((W - art.x) * 0.5, 40), art * 0.9)
+			_place(ph_start_floor, Vector2(right, low - 20.0 - 34.0), row)
+			_place(ph_start_btn[0], Vector2(right, low), btn)
+			_place(ph_start_btn[1], Vector2(40, low), btn)
+		else:
+			_place(ph_art, Vector2((W - art.x) * 0.5, 64), art)
+			_place(ph_start_btn[0], Vector2((W - PH_W) * 0.5, 268), btn)
+		_place(ph_stars, Vector2(40, 40))
+		ph_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+		_place(ph_title, Vector2(40, 100), Vector2(PH_W, 54))
+		_place(ph_rows, Vector2(right, 70), Vector2(PH_W, 76))
+		_place(ph_res_floor, Vector2(right, low - 20.0 - 34.0), row)
+		_place(ph_res_btn[0], Vector2(right, low), btn)
+		_place(ph_res_btn[1], Vector2(40, low), btn)
+	ph_start_floor.visible = _ph_returning
+	ph_res_floor.visible = not _ph_win
+
+
+func _show_phone(page: Control) -> void:
+	var was := _ph_page
+	_ph_page = page
+	for p in [ph_start, ph_result]:
+		p.visible = p == page
+	phone_canvas.visible = true
+	if pad:
+		pad.set_enabled(false)
+	_layout_phone()
+	if was == null:   # fades in
+		phone_bg.modulate.a = 0.0
+		phone_root.modulate.a = 0.0
+		var tw := create_tween().set_parallel()
+		tw.tween_property(phone_bg, "modulate:a", 1.0, 0.25)
+		tw.tween_property(phone_root, "modulate:a", 1.0, 0.25)
+
+
+func hide_phone() -> void:
+	_ph_page = null
+	phone_canvas.visible = false
+	for p in [ph_start, ph_result]:
+		p.visible = false
+	if pad:
+		pad.set_enabled(true)
+
+
 func _build_play() -> void:
 	# --- top left: "Floor 1" (32 px bold, white, 2 px black shadow), 24 / 15 px from the corner
 	floor_lbl = _label("Floor 1", 32, WHITE, 2, true)
-	var mc := _anchor(floor_lbl, BoxContainer.ALIGNMENT_BEGIN, Control.SIZE_SHRINK_BEGIN, 0)
-	mc.add_theme_constant_override("margin_left", 24)
-	mc.add_theme_constant_override("margin_top", 15)
+	_floor_mc = _anchor(floor_lbl, BoxContainer.ALIGNMENT_BEGIN, Control.SIZE_SHRINK_BEGIN, 0)
 	# --- top right: the grid load meter, 16 px from the corner
 	meter = LoadMeter.new()
 	meter.font = font
-	_anchor(meter, BoxContainer.ALIGNMENT_BEGIN, Control.SIZE_SHRINK_END, 16)
+	_meter_mc = _anchor(meter, BoxContainer.ALIGNMENT_BEGIN, Control.SIZE_SHRINK_END, 16)
 
 
 func _build_prompt() -> void:
@@ -524,7 +758,7 @@ func _build_prompt() -> void:
 	prompt_rtl.add_theme_font_size_override("normal_font_size", 20)
 	prompt_rtl.add_theme_color_override("default_color", DARK)
 	prompt_card.add_child(prompt_rtl)
-	_anchor(prompt_card, BoxContainer.ALIGNMENT_END, Control.SIZE_SHRINK_CENTER, 16)
+	_prompt_mc = _anchor(prompt_card, BoxContainer.ALIGNMENT_END, Control.SIZE_SHRINK_CENTER, 16)
 
 
 func _build_big() -> void:
@@ -565,8 +799,8 @@ func key_name(key: String) -> String:
 		if key == "Esc" and Crazy.enabled:
 			return "Q"   # the CrazyGames build: Esc leaves the site's fullscreen, "back" is Q there
 		return Lang.t(key)   # "Пробіл" -> "Space"
-	var b: Dictionary = GameConfig.TOUCH_BUTTONS
-	return {"Enter": b["a"], "Пробіл": b["a"], "Esc": b["b"]}.get(key, key)
+	# the switch-off button: its picture goes into the prompt (see prompt())
+	return {"Enter": "{power}", "Пробіл": "{power}", "Esc": "Esc"}.get(key, key)
 
 
 ## Touch screen or keyboard (layout.gd).
@@ -585,36 +819,59 @@ func show_start(next_floor: int) -> void:
 	if next_floor > 1:
 		buttons.append(["Restart game", false, "restart"])
 	_set_buttons(start_buttons, buttons)
-	_show_sheet(start_panel)
+	# the phone page
+	_ph_returning = next_floor > 1
+	ph_start_floor_val.text = str(next_floor)
+	_ph_set(ph_start_btn[0], buttons[0])
+	_ph_set(ph_start_btn[1], buttons[1] if buttons.size() > 1 else [])
+	_show_menu(start_panel, ph_start)
 
 
 ## A floor's result. stars: 0..3 (shown on success); used_wh: energy used; econ: savings 0..1; floor_num: the
 ## floor (shown on fail); buttons as in _set_buttons.
 func show_result(win: bool, stars: int, used_wh: float, econ: float, floor_num: int, buttons: Array) -> void:
 	_all_off(true)
-	res_stars.visible = win
-	for c in res_stars.get_children():
-		c.queue_free()
-	if win:
+	res_stars.visible = true   # a fail shows them too, all grey (Figma "Fail")
+	for box in [res_stars, ph_stars]:
+		for c in box.get_children():
+			c.queue_free()
 		for i in 3:
-			var on := i < stars
+			var on := win and i < stars
 			var tex := Icons.svg_scaled("star_on" if on else "star_off", Icons.STAR_SVG if on else Icons.STAR_GREY_SVG, 4.0)
 			var star := _icon(tex, Vector2(50, 50))
-			res_stars.add_child(star)
+			box.add_child(star)
 			# the stars pop in one after another once the panel has slid in
 			star.pivot_offset = Vector2(25, 25)
 			star.scale = Vector2.ZERO
 			var tw := star.create_tween()
 			tw.tween_interval(SHEET_TIME * 0.6 + 0.22 * i)
 			tw.tween_property(star, "scale", Vector2.ONE, 0.35).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
-	res_title.text = "Success" if win else "Fail"
-	res_title.add_theme_color_override("font_color", GREEN if win else RED)
-	res_used.text = "%.1f Wh" % used_wh
-	res_econ.text = "%d%%" % roundi(econ * 100.0)
+	for t in [res_title, ph_title]:
+		t.text = "Success" if win else "Fail"
+		t.add_theme_color_override("font_color", GREEN if win else RED)
+	for l in [res_used, ph_used]:
+		l.text = "%.1f Wh" % used_wh
+	for l in [res_econ, ph_econ]:
+		l.text = "%d%%" % roundi(econ * 100.0)
 	res_floor_row.visible = not win
 	res_floor_val.text = str(floor_num)
+	ph_res_floor_val.text = str(floor_num)
+	_ph_win = win
 	_set_buttons(res_buttons, buttons)
-	_show_sheet(result_panel)
+	_ph_set(ph_res_btn[0], buttons[0])
+	_ph_set(ph_res_btn[1], buttons[1] if buttons.size() > 1 else [])
+	_show_menu(result_panel, ph_result)
+
+
+func _show_menu(desk: Control, phone: Control) -> void:
+	## The desktop panel page or the phone page, whichever the layout asks for.
+	if phone_mode == "":
+		hide_phone()
+		_show_sheet(desk)
+	else:
+		hide_sheet()
+		_desk_page = desk
+		_show_phone(phone)
 
 
 func show_play(floor_num: int) -> void:
@@ -624,9 +881,15 @@ func show_play(floor_num: int) -> void:
 	floor_lbl.text = "Floor %d" % floor_num
 
 
-## The controls at the bottom (a game starting); not on a touch screen: its own stick and buttons are there.
+## The controls at the bottom with the goal above them (a game starting); on a touch screen only the goal: its
+## own stick and buttons are there.
 func show_controls(on: bool) -> void:
-	controls.visible = on and not touch_keys
+	# phones: the touch pad shows the hints by its own controls; desktop: the keys
+	controls.visible = on and phone_mode == ""
+	controls.keys = not touch_keys
+	controls.queue_redraw()
+	if pad:
+		pad.set_hints(on and phone_mode != "")
 
 
 func update_play(load_kw: float, limit_kw: float) -> void:
@@ -637,9 +900,22 @@ func update_play(load_kw: float, limit_kw: float) -> void:
 
 
 func prompt(bbcode: String) -> void:
+	## A hint card at the bottom. "{power}" in the text: the phone's switch-off button, drawn as a small picture.
 	prompt_card.visible = bbcode != ""
-	if prompt_rtl.text != bbcode:
+	if bbcode == _prompt_src:
+		return
+	_prompt_src = bbcode
+	if not bbcode.contains("{power}"):
 		prompt_rtl.text = bbcode
+		return
+	var parts := bbcode.replace("[color=#ffae00]{power}[/color]", "{power}").replace("Press ", "Tap ").split("{power}")
+	prompt_rtl.clear()
+	prompt_rtl.text = ""
+	for i in parts.size():
+		if i > 0:
+			prompt_rtl.add_image(Icons.svg_scaled("power_coin", Icons.POWER_COIN_SVG, 4.0), _prompt_img, _prompt_img,
+					Color.WHITE, INLINE_ALIGNMENT_CENTER)
+		prompt_rtl.append_text(parts[i])
 
 
 func big(text: String) -> void:
@@ -656,7 +932,7 @@ func toast(text: String) -> void:
 func fly_power(from: Vector2, watts: int) -> void:
 	from = to_frame(from)
 	from.y = maxf(from.y, FLY_RISE + 30.0)   # an appliance at the top edge: keep the number on screen
-	var l := _label(Lang.t("%d Вт") % watts, FLY_SIZE, FLY_COLOR)
+	var l := _label(Lang.t("%d Вт") % watts, roundi(FLY_SIZE * _fly_boost), FLY_COLOR)
 	l.add_theme_color_override("font_outline_color", DARK)
 	l.add_theme_constant_override("outline_size", 8)
 	root.add_child(l)
@@ -682,7 +958,7 @@ func fly_power(from: Vector2, watts: int) -> void:
 
 func _meter_target() -> Vector2:
 	## The meter's per cent (its right end).
-	return to_frame(meter.get_global_transform() * Vector2(meter.size.x - 28.0, meter.size.y / 2.0))
+	return to_frame(meter.get_global_transform() * Vector2(meter.size.x - 28.0 * meter.zoom, meter.size.y / 2.0))
 
 
 func _fly_step(l: Label, p0: Vector2, k: float) -> void:
@@ -738,32 +1014,98 @@ func set_indicators(items: Array) -> void:
 ## wide desktop window and in the top half of a phone screen.
 ## play_boost: on a phone the frame is small, so the play HUD (floor, meter, prompt, toast) is drawn this much
 ## larger again. side: where the panel goes, "left" (landscape) or "bottom" (portrait phone).
-func set_frame(r: Rect2, s: float, play_boost := 1.0, side := "left") -> void:
-	play_boost = maxf(play_boost, HUD_MIN_PX / (HUD_SMALL * s))   # a small frame: the play HUD stays readable
+func set_frame(r: Rect2, s: float, mode := "landscape", unit := 1.0, area := Rect2(), screen := Vector2()) -> void:
+	## r: the game frame (window px), s: the HUD's scale; mode / unit / area / screen: layout.gd's (phones: the
+	## play HUD and the menu pages in pt of the mockup phone, unit window px per pt).
+	var phone := "" if mode == "landscape" else ("portrait" if mode == "portrait" else "landscape")
+	var turned := phone != phone_mode
+	phone_mode = phone
+	_pu = unit
+	_area = area if area.has_area() else r
+	_screen = screen if screen != Vector2.ZERO else r.end
 	root.set_anchors_preset(Control.PRESET_TOP_LEFT)
 	root.scale = Vector2(s, s)
 	root.position = r.position
 	root.size = r.size / s
 	# [control, extra scale, pivot as a share of its size: the corner / edge it is pinned to]
-	_boosted = [[floor_lbl, play_boost, Vector2(0, 0)], [meter, play_boost, Vector2(1, 0)],
-			[prompt_card, play_boost, Vector2(0.5, 1)], [toast_lbl, play_boost, Vector2(0.5, 0)]]
-	for b in _boosted:
-		(b[0] as Control).scale = Vector2.ONE * float(b[1])
-	_pin_boosted()
+	if phone != "":
+		var k := unit / s   # HUD units per pt
+		_boosted = [[floor_lbl, k * 24.0 / 32.0, Vector2(0, 0)], [meter, k, Vector2(1, 0)],
+				[prompt_card, k * (15.0 if phone == "portrait" else 18.0) / 20.0, Vector2(0.5, 1)], [toast_lbl, k * 20.0 / 24.0, Vector2(0.5, 0)],
+				[big_lbl, k * 64.0 / 90.0, Vector2(0.5, 0.5)]]
+		_margins(_floor_mc, 18.0 * k, 18.0 * k, 0.0, 0.0)
+		_margins(_meter_mc, 16.0 * k, 16.0 * k, 16.0 * k, 16.0 * k)
+		var over: float = GameConfig.PHONE["panel_overlap"] if phone == "portrait" else 0.0
+		_margins(_prompt_mc, 16.0 * k, 16.0 * k, 16.0 * k, (16.0 + over) * k)   # above the controls panel
+		_fly_boost = k * 22.0 / FLY_SIZE
+	else:
+		var b := maxf(1.0, HUD_MIN_PX / (HUD_SMALL * s))   # a small frame: the play HUD stays readable
+		_boosted = [[floor_lbl, b, Vector2(0, 0)], [meter, b, Vector2(1, 0)], [prompt_card, b, Vector2(0.5, 1)],
+				[toast_lbl, b, Vector2(0.5, 0)], [big_lbl, 1.0, Vector2(0.5, 0.5)]]
+		_margins(_floor_mc, 24.0, 15.0, 0.0, 0.0)
+		_margins(_meter_mc, 16.0, 16.0, 16.0, 16.0)
+		_margins(_prompt_mc, 16.0, 16.0, 16.0, 16.0)
+		_fly_boost = 1.0
+	_apply_boosts()
 	_frame = r
 	_hud_s = s
-	sheet_side = side
+	sheet_side = "left"
 	_apply_side()
+	if turned:   # the phone turned (or the window became a phone's): the same menu, the other kind of page
+		if phone != "" and _cur_page != null:
+			var desk := _cur_page
+			hide_sheet()
+			_desk_page = desk
+			_show_phone(ph_start if desk == start_panel else ph_result)
+		elif phone == "" and _ph_page != null:
+			var desk := _desk_page
+			hide_phone()
+			if desk != null:
+				_show_sheet(desk)
 	_layout_sheet()
+	_layout_phone()
+
+
+func _apply_boosts() -> void:
+	## The play HUD drawn larger (phones, small frames): bigger fonts and sizes (a container would undo a scale).
+	for b in _boosted:
+		var c: Control = b[0]
+		var f := float(b[1])
+		if c == meter:
+			meter.set_zoom(f)
+		elif c == prompt_card:
+			prompt_rtl.add_theme_font_size_override("normal_font_size", roundi(20.0 * f))
+			var sb := prompt_card.get_theme_stylebox("panel") as StyleBoxFlat
+			sb.content_margin_left = 20.0 * f
+			sb.content_margin_right = 20.0 * f
+			sb.content_margin_top = 10.0 * f
+			sb.content_margin_bottom = 10.0 * f
+			sb.set_corner_radius_all(roundi(16.0 * f))
+			_prompt_img = roundi(26.0 * f)
+			_prompt_src = ""   # rebuild the picture at the new size
+		elif c is Label:
+			var l := c as Label
+			var base := {floor_lbl: [32, 2], toast_lbl: [24, 2], big_lbl: [90, 6]}
+			var spec: Array = base.get(l, [24, 2])
+			l.add_theme_font_size_override("font_size", roundi(spec[0] * f))
+			l.add_theme_constant_override("shadow_offset_x", maxi(roundi(spec[1] * f), 1))
+			l.add_theme_constant_override("shadow_offset_y", maxi(roundi(spec[1] * f), 1))
+			if l == big_lbl:
+				_leading(big_lbl, roundi(90 * f), 0.9)
+
+
+func _margins(mc: MarginContainer, left: float, top: float, right: float, bottom: float) -> void:
+	for pair in [["left", left], ["top", top], ["right", right], ["bottom", bottom]]:
+		mc.add_theme_constant_override("margin_" + pair[0], int(roundf(pair[1])))
 
 
 # ======================================================================= the panel
 func _apply_side() -> void:
 	var phone := sheet_side == "bottom"
 	sheet.side = sheet_side
-	var pad := SHEET_PHONE_PAD if phone else SHEET_PAD
+	var margin := SHEET_PHONE_PAD if phone else SHEET_PAD
 	for m in ["left", "right", "top", "bottom"]:
-		sheet.add_theme_constant_override("margin_" + m, int(roundf(pad)))
+		sheet.add_theme_constant_override("margin_" + m, int(roundf(margin)))
 	sheet.queue_redraw()
 
 
@@ -869,8 +1211,12 @@ func _all_off(keep_sheet := false) -> void:
 	_clear_flyers()
 	for c in [floor_lbl, meter, prompt_card, controls]:
 		c.visible = false
+	if pad:
+		pad.set_hints(false)
 	if not keep_sheet:
 		hide_sheet()
+		hide_phone()
+		_desk_page = null
 	dim_rect.color.a = 0.0
 	set_indicators([])
 	big("")
