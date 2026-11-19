@@ -1306,8 +1306,9 @@ func _exit_tree() -> void:
 
 
 func _run_og_shot(path: String) -> void:
-	## Picture for the web page's link preview (src/web/og.py adds the title): the whole family in the living
-	## room, in the right part of the frame (the left part is left for the text). Saved at 1200 x 630.
+	## Picture for the web page's link preview (src/web/og.py adds the title): the child in the living room with
+	## a few appliances on (glow, "!", rings), in the right part of the frame (the left part is left for the
+	## text). Saved at 1200 x 630. --shot-family: the four characters instead (the earlier covers).
 	## The same for the CrazyGames covers (src/web/covers.py adds the title), with -- --fill-frame and:
 	##   --shot-size=WxH   picture size (1200x630)
 	##   --shot-panel=P    share of the width kept free on the left for the text (500 / 1200)
@@ -1331,13 +1332,19 @@ func _run_og_shot(path: String) -> void:
 	await get_tree().create_timer(0.5).timeout
 	hud.hide_sheet()
 	hud.visible = false
+	var family := OS.get_cmdline_user_args().has("--shot-family")
 	var pouf: Node = apartments["1"]["root"].find_child("pouf*", true, false)
-	if pouf is Node3D:
+	if pouf is Node3D and family:
 		(pouf as Node3D).visible = false   # it would hide the father's feet
 	var right := Vector3(1, 0, -1).normalized()   # screen-horizontal in the isometric view
 	var front := Vector3(1, 0, 1).normalized()    # towards the camera
-	# [character, metres to the right, metres to the front]: a small group, the dog in front
-	var group := [[2, -0.8, -0.25], [0, 0.0, -0.45], [3, 0.75, -0.2], [1, 0.3, 0.45]]
+	# [character, metres to the right, metres to the front]: a small group, the dog in front; or the child
+	var group := [[2, -0.8, -0.25], [0, 0.0, -0.45], [3, 0.75, -0.2], [1, 0.3, 0.45]] if family \
+			else [[_playable(), 0.0, 0.0]]
+	if not family:   # what the game is about: appliances on round the child
+		for a in apps:
+			if a.id in ["tv", "floor_lamp", "heater"]:
+				a.set_on(true, 0.0)
 	for i in group.size():
 		var g: Array = group[i]
 		var p: Player = player if i == 0 else Player.new()
