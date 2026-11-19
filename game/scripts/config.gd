@@ -9,6 +9,10 @@ const APARTMENT_DIR := "res://assets/models/apartment/"
 const ROUND_TIME := 60.0        # seconds per floor
 const NO_SPAWN_LAST := 5.0      # last seconds without new appliances
 const OVERLOAD_GRACE := 2.5     # seconds above the limit before the fuses blow (a floor can set its own "grace")
+## From this share of the grid's limit the lights flicker now and then (more often closer to it, FLICKER_RATE
+## flickers per second at the limit; overloaded twice as often, with crackling).
+const FLICKER_FROM := 0.8
+const FLICKER_RATE := 3.0
 ## Last LATE_SPAWN_WINDOW seconds: an appliance switches on only if the player can still switch everything off in time:
 ## walking the routes through the doors at LATE_SPAWN_PACE of the character's speed, LATE_SPAWN_REACT seconds to notice
 ## each appliance, with LATE_SPAWN_MARGIN seconds to spare. Keeps the end of the round fair in the big flats.
@@ -35,10 +39,12 @@ const COMPAT_LIGHTING := {"glow": false, "sun": 0.33, "ambient": 0.27, "lamps": 
 ## Window: base resolution (logical pixels). On Retina/HiDPI screens the window is scaled up.
 const WINDOW_SIZE := Vector2i(1280, 720)
 
-## Adaptive layout (Figma "iPhone 17 - 1"): the game sits in a rounded frame on a light background.
+## Adaptive layout (Figma "iPhone 17 - 1"). The game fills the window edge to edge: no gap round it, square
+## corners (the mockup had a 2.5 % gap and rounded corners: FRAME_MARGIN 0.025, FRAME_RADIUS 0.031). The light
+## background shows only round the touch controls on a phone.
 const BACKGROUND_COLOR := Color("e5ecee")
-const FRAME_MARGIN := 0.025       # gap round the frame: share of the window's shorter side (10 px on a phone)
-const FRAME_RADIUS := 0.031       # corner radius: share of the frame's shorter side
+const FRAME_MARGIN := 0.0         # gap round the frame: share of the window's shorter side
+const FRAME_RADIUS := 0.0         # corner radius: share of the frame's shorter side
 const UI_REF_SIZE := Vector2(812, 720)   # the HUD is scaled so this much of it fits into the frame
 ## Touch controls (analog stick + two buttons): "auto" = in portrait, and on touch screens in landscape too;
 ## "always" / "never".
@@ -121,6 +127,10 @@ const APPLIANCE_UNLOCK := {
 	"heater": 7, "stove": 8, "washer": 9, "boiler": 10,
 }
 
+## This version plays with one character (PLAYABLE, the child); the others stay here for later updates.
+const PLAYABLE := "child"
+## "stars": the characters open up as the player collects stars (best result of each floor counts, up to 30):
+## Joan from the start, Nika at 4, Alex at 10, Rex at 18.
 ## Footsteps: "steps" = sound set (assets/sounds/steps/<steps>_<wood|tile>_<n>.wav: barefoot, paws, slippers,
 ## sneakers), "step_phases" = moments of the walk animation (0..1) when a foot touches the floor (taken from the
 ## animations: people step at 13% and 59% of the cycle; the dog's front and back paws land in pairs),
@@ -129,15 +139,53 @@ const STEP_VOLUME_DB := -5.1   # -2 dB minus 30 % (x0.7 = -3.1 dB)
 const CHARACTERS := [
 	{"id": "mother", "name": "Джоан", "role": "Мати", "file": "res://assets/models/characters/mother.glb",
 	 "speed": 3.0, "switch_time": 0.6, "radius": 0.22, "steps": "barefoot", "step_phases": [0.13, 0.59],
-	 "desc": "Збалансована: середня швидкість і швидке вимикання."},
+	 "stars": 0, "desc": "Збалансована: середня швидкість і швидке вимикання."},
 	{"id": "dog", "name": "Рекс", "role": "Собака", "file": "res://assets/models/characters/dog.glb",
 	 "speed": 3.8, "switch_time": 1.0, "radius": 0.3, "steps": "paws", "step_phases": [0.97, 0.03, 0.47, 0.53],
 	 "step_gains": [0.0, -4.0, 0.0, -4.0],
-	 "desc": "Найшвидший, але вимикає прилад довше — тягне носом."},
+	 "stars": 18, "desc": "Найшвидший, але вимикає прилад довше — тягне носом."},
 	{"id": "father", "name": "Алекс", "role": "Батько", "file": "res://assets/models/characters/father.glb",
 	 "speed": 2.6, "switch_time": 0.3, "radius": 0.22, "steps": "slippers", "step_phases": [0.13, 0.59],
-	 "desc": "Повільніший, зате вимикає миттєво."},
+	 "stars": 10, "desc": "Повільніший, зате вимикає миттєво."},
 	{"id": "child", "name": "Ніка", "role": "Донька", "file": "res://assets/models/characters/child.glb",
 	 "speed": 3.4, "switch_time": 0.7, "radius": 0.2, "steps": "sneakers", "step_phases": [0.13, 0.59],
-	 "desc": "Швидкий і маленький — легко пробігає між меблями."},
+	 "stars": 4, "desc": "Швидкий і маленький — легко пробігає між меблями."},
 ]
+
+
+## Upgrades bought between floors with the energy saved (main.gd: the shop; SaveData keeps the bank and the levels).
+## Every passed floor puts the energy saved on it into the bank (a failed one half of it). Three levels each.
+##   speed — slippers: the character runs UPGRADE_SPEED faster per level;
+##   plug  — smart plug: switches off the appliance that has been on longest, every PLUG_INTERVAL[level] seconds
+##           of something being on;
+##   fuse  — stronger fuses: FUSE_EXTRA more seconds of overload per level before they blow.
+const UPGRADES := [
+	{"id": "speed", "name": "Капці-скороходи", "desc": "+8% швидкості за рівень", "costs": [60, 160, 320]},
+	{"id": "plug", "name": "Розумна розетка", "desc": "сама вимикає прилад", "costs": [100, 220, 400]},
+	{"id": "fuse", "name": "Міцні запобіжники", "desc": "+1 с до замикання за рівень", "costs": [80, 180, 340]},
+]
+const UPGRADE_SPEED := 0.08
+const PLUG_INTERVAL := [0.0, 20.0, 14.0, 9.0]
+const FUSE_EXTRA := 1.0
+const FAIL_BANK_SHARE := 0.5   # a failed floor banks this share of the energy saved
+
+## Endless mode: after the 10th floor the game goes on. Floor 10 + k uses the apartments in turn (ENDLESS_MODELS,
+## every second round in the other colours) and gets harder each time: appliances switch on ENDLESS_FASTER
+## times sooner (no sooner than ENDLESS_MIN_INTERVAL), more of them at once, a lower limit, a higher target.
+const ENDLESS_MODELS := ["1", "2", "3", "7", "9"]
+const ENDLESS_FASTER := 0.95
+const ENDLESS_MIN_INTERVAL := Vector2(2.2, 3.0)
+
+
+## A floor's settings (idx from 0): the table above for floors 1-10, generated for the endless floors after them.
+static func floor_cfg(idx: int) -> Dictionary:
+	if idx < FLOORS.size():
+		return FLOORS[idx]
+	var k := idx - FLOORS.size() + 1   # 1 = floor 11
+	var last: Dictionary = FLOORS[FLOORS.size() - 1]
+	var m: String = ENDLESS_MODELS[(k - 1) % ENDLESS_MODELS.size()]
+	var iv: Vector2 = (last["interval"] as Vector2) * pow(ENDLESS_FASTER, k)
+	return {"floor": idx + 1, "model": m, "recolor": floori((k - 1) / float(ENDLESS_MODELS.size())) % 2 == 0,
+		"grace": 8.0 if m in ["7", "9"] else 4.0, "interval": iv.max(ENDLESS_MIN_INTERVAL),
+		"max_on": mini(5 + floori(k / 3.0), 7), "limit_kw": maxf(3.6 - 0.05 * k, 3.2),
+		"threshold": minf(0.76 + 0.01 * k, 0.85), "double": minf(0.25 + 0.03 * k, 0.5)}

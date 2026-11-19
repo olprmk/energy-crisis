@@ -1,5 +1,7 @@
 class_name Lang
 ## Language of the game's texts: Ukrainian when the game is opened in Ukraine, English everywhere else.
+## Version 1 (the Figma redesign) is English only: main.gd sets Lang.code = "en" instead of calling detect(), and
+## the new screens' texts are written in English; everything below stays for bringing Ukrainian back.
 ##
 ## The Ukrainian texts are the keys: Lang.t("Поверх %d з %d") % [n, total] gives the English template in English
 ## and the text itself in Ukrainian (a text that is not in EN stays as it is).
@@ -61,6 +63,40 @@ const EN := {
 	"увімкнено": "on",
 	"вимкнено": "off",
 	"Масштаб: %.1f": "Zoom: %.1f",
+	"мета ≥ %d%%": "goal ≥ %d%%",
+	"Перевантаження!": "Overload!",
+	# progress: upgrades, characters, endless floors
+	"Покращення": "Upgrades",
+	"Енергія: %d Вт • год": "Energy: %d Wh",
+	"макс.": "max",
+	"%d Вт • год": "%d Wh",
+	"Відкриється, коли буде %d зірок": "Opens at %d stars",
+	"щоб почати з поверху %d": "to start from floor %d",
+	"щоб відкрити покращення": "for upgrades",
+	"Зірки: %d з %d · Енергія: %d Вт • год": "Stars: %d of %d · Energy: %d Wh",
+	"Поверх %d · без кінця": "Floor %d · endless",
+	"Без кінця: що далі, то важче": "Endless: harder and harder",
+	"Розумна розетка!": "Smart plug!",
+	"Зекономлено: %.1f Вт • год (+%d у скарбничку)": "Energy saved: %.1f Wh (+%d to the bank)",
+	"Рекорд: поверх %d": "Best: floor %d",
+	"Новий персонаж: %s!": "New character: %s!",
+	"щоб іти на поверх %d": "to go to floor %d",
+	"щоб вийти в меню": "for the menu",
+	"щоб повернутися": "to go back",
+	"Далі — без кінця: що вище, то важче.": "Next: endless floors, harder and harder.",
+	"щоб грати далі": "to keep playing",
+	"Капці-скороходи": "Speedy slippers",
+	"Розумна розетка": "Smart plug",
+	"Міцні запобіжники": "Strong fuses",
+	"+8% швидкості за рівень": "+8% speed per level",
+	"сама вимикає прилад": "switches things off by itself",
+	"+1 с до замикання за рівень": "+1 s before the fuses blow, per level",
+	"%d Вт": "%d W",
+	# the first floor's lessons
+	"Рух": "Move",
+	"Вимкнути": "Switch off",
+	"Знайди ! і вимкни прилад": "Find the ! and switch it off",
+	"Чудово! Не перевантаж мережу": "Great! Don't overload the grid",
 	# results
 	"Поверх пройдено!": "Floor cleared!",
 	"Поверх не пройдено!": "Floor failed!",

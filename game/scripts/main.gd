@@ -1,8 +1,10 @@
 extends Node3D
-## Game flow: name -> character select -> countdown -> 60 s round -> result -> next floor (1..10).
+## Game flow (Figma "KeyLock" 48:2814): start screen -> countdown -> 60 s round -> result: success (next floor /
+## restart the game) or fail (try the floor again / restart) -> ... floors 1..10, then endless floors.
+## This version: English only, one character (the child; the others stay in the game for later updates).
 
 
-enum State { NAME, SELECT, COUNTDOWN, PLAY, RESULT, COMPLETE, BUSY }
+enum State { START, COUNTDOWN, PLAY, RESULT, BUSY }
 
 var state := State.BUSY
 var floor_idx := 0
@@ -14,6 +16,7 @@ var apartments := {}        # model id -> built apartment (see _build_apartment)
 var player: Player
 var rig: CameraRig
 var hud: Hud
+var crazy: Crazy = null   # CrazyGames build only (scripts/crazy.gd): SDK events, username, mute
 var sfx: Sfx
 var steps   # scripts/footsteps.gd
 var fx: ScreenFx
@@ -23,6 +26,9 @@ var sun: DirectionalLight3D
 var env: Environment
 var _sun_energy := 1.2       # daylight (the blackout after a short circuit dims it)
 var _ambient_energy := 0.6
+var lamps: Array = []        # [OmniLight3D, its energy] of the apartment on screen (they flicker near overload)
+var _flick_left := 0.0       # s left of the current flicker
+var _flick_dim := 1.0        # the lights' share during it
 var apps: Array[Appliance] = []
 var lift_label: Label3D   # floor number on the lift display
 var spawn_pos := Vector3.ZERO
@@ -41,11 +47,15 @@ var alarm_t := 0.0
 var spawned := 0
 var switched := 0
 var total_stars := 0
+var _plug_t := 0.0           # smart plug: seconds of something being on since it last switched one off
 var save            # SaveData (scripts/save_data.gd): last name + leaderboard, stored in user://save.json
 var player_name := ""
 var run_passed_wh := 0.0   # energy saved on floors already passed in this run
 var result_win := false
-var _floor_sub := ""     # countdown subtitle: floor number + newly unlocked appliances
+# a game just started (from the start screen): the controls are shown at the bottom and the first appliance
+# switches on next to the player, until the first appliance is switched off
+var _controls := false
+var _demo := false         # screenshot / test run (separate save)
 var _char_scenes: Array = []   # the four characters' models, loaded once: switching characters must not reload them
 var _switch_target: Appliance
 
@@ -57,7 +67,8 @@ var _bot_react := 0.0       # autotest bot reaction time, s (--bot-react=0.8)
 var _all_floors := false     # autotest: keep going after a failed floor (balance report)
 var _last_reason := ""       # why the last round ended (autotest report)
 var _physical := false       # autotest: the bot walks with collisions at the character's speed (finds stuck spots)
-var _bot_char := 0           # autotest: character (--char=1..4)
+var _video := false          # autotest --video: real time, appliances from the first second (trailer recording)
+var _bot_char := -1          # autotest: character (--char=1..4; default: the playable one)
 var _step_count := {}        # autotest: footsteps heard per floor surface
 var _floor_from := 0         # autotest: floors _floor_from + 1 .. _floor_to
 var _floor_to := 0
@@ -78,13 +89,19 @@ func _ready() -> void:
 			_all_floors = true
 		elif a == "--physical":
 			_physical = true
+		elif a == "--video":
+			_video = true
 		elif a.begins_with("--char="):
 			_bot_char = int(a.substr(7)) - 1
 		elif a.begins_with("--floors="):   # e.g. --floors=7-10: only these floors (balance runs)
 			var r := a.substr(9).split("-")
 			_floor_from = int(r[0]) - 1
 			_floor_to = int(r[r.size() - 1])
-	Lang.detect()   # Ukrainian in Ukraine, English elsewhere (lang.gd)
+	if Crazy.enabled:
+		crazy = Crazy.new()
+		add_child(crazy)
+		await crazy.setup()   # the page initialises the SDK; it also decides the language there
+	Lang.code = "en"   # this version: English only (lang.gd keeps the Ukrainian texts for later)
 	_setup_window()
 	_setup_input()
 	_setup_world()
@@ -109,42 +126,49 @@ func _ready() -> void:
 	_use_apartment(0)
 	hud = Hud.new()
 	add_child(hud)
-	hud.name_submitted.connect(_on_name_submitted)
 	hud.view_changed.connect(func(r: Rect2) -> void: rig.view = r)   # the menu sheet covers part of the frame
 	screen_layout = preload("res://scripts/layout.gd").new()
 	add_child(screen_layout)
 	screen_layout.layout_changed.connect(_on_layout_changed)
 	var demo := false   # screenshot / test runs use a separate save file
 	for a in args:
-		if a.begins_with("--result-shots=") or a.begins_with("--select-shots=") or a.begins_with("--fail-shots=") \
-				or a.begins_with("--floor-shots=") or a.begins_with("--stick-shots=") or a.begins_with("--og-shot=") \
-				or a == "--autotest":
+		if a.begins_with("--ui-shots=") or a.begins_with("--floor-shots=") or a.begins_with("--stick-shots=") \
+				or a.begins_with("--og-shot=") or a.begins_with("--fx-shots=") or a == "--autotest":
 			demo = true
-	save = preload("res://scripts/save_data.gd").new("user://save_demo.json" if demo else "user://save.json")
+	_demo = demo
+	save = preload("res://scripts/save_data.gd").new("user://save_demo.json" if demo else "user://save.json",
+			Crazy.enabled and not demo)
+	if demo:   # test runs start with no progress
+		save.stars = {}
+		save.bank = 0.0
+		save.upgrades = {}
+		save.best_floor = 0
+		save.next_floor = 0
+		save.controls_day = ""
 	player_name = save.last_name
+	if Crazy.enabled and crazy and crazy.username != "":
+		player_name = crazy.username
+	char_idx = _playable()
 	for c in GameConfig.CHARACTERS:
 		_char_scenes.append(load(c["file"]))
 	if not demo:
 		await _warm_up()
-	enter_name()
+	enter_start()   # one click (Start) from the game
 	for arg in args:
-		if arg.begins_with("--select-shots="):
-			_run_select_shots(arg.substr(15))
-			return
-		if arg.begins_with("--result-shots="):
-			_run_result_shots(arg.substr(15))
+		if arg.begins_with("--ui-shots="):
+			_run_ui_shots(arg.substr(11))
 			return
 		if arg.begins_with("--floor-shots="):
 			_run_floor_shots(arg.substr(14))
-			return
-		if arg.begins_with("--fail-shots="):
-			_run_fail_shots(arg.substr(13))
 			return
 		if arg.begins_with("--stick-shots="):
 			_run_stick_shots(arg.substr(14))
 			return
 		if arg.begins_with("--og-shot="):
 			_run_og_shot(arg.substr(10))
+			return
+		if arg.begins_with("--fx-shots="):
+			_run_fx_shots(arg.substr(11))
 			return
 	if autotest:
 		_run_autotest()
@@ -174,7 +198,7 @@ func _on_layout_changed(frame: Rect2) -> void:
 	hud.set_touch_keys(screen_layout.touch_hints)
 	var boost: float = GameConfig.TOUCH_HUD_BOOST.get(screen_layout.mode, 1.0)
 	rig.frame = frame
-	if state in [State.SELECT, State.NAME, State.RESULT, State.COMPLETE]:
+	if state in [State.START, State.RESULT]:
 		rig.zoom = _menu_zoom()   # turned between portrait and landscape on a menu screen
 	hud.set_frame(frame, screen_layout.hud_scale, boost, "bottom" if screen_layout.mode == "portrait" else "left")
 	rig.screen = screen_layout.screen
@@ -187,9 +211,9 @@ func _setup_input() -> void:
 		"move_up": [KEY_W, KEY_UP], "move_down": [KEY_S, KEY_DOWN],
 		"move_left": [KEY_A, KEY_LEFT], "move_right": [KEY_D, KEY_RIGHT],
 		"interact": [KEY_SPACE, KEY_E], "confirm": [KEY_ENTER, KEY_KP_ENTER],
-		"restart": [KEY_R], "back": [KEY_ESCAPE],
+		"restart": [KEY_R], "back": [KEY_Q, KEY_BACKSPACE] if Crazy.enabled else [KEY_ESCAPE],   # Esc leaves CrazyGames' fullscreen
 		"zoom_in": [KEY_EQUAL, KEY_KP_ADD], "zoom_out": [KEY_MINUS, KEY_KP_SUBTRACT],
-		"music": [KEY_M], "language": [KEY_L],
+		"music": [KEY_M],
 	}
 	for action in map:
 		if not InputMap.has_action(action):
@@ -249,7 +273,7 @@ func _bl(a: Array) -> Vector3:
 ## An apartment is built the first time it is needed (model, walls / furniture colliders, appliances, lift display)
 ## and kept: while another one is on screen it is just out of the scene tree.
 func _use_apartment(fidx: int) -> void:
-	var row: Dictionary = GameConfig.FLOORS[fidx]
+	var row: Dictionary = GameConfig.floor_cfg(fidx)
 	var m: String = row.get("model", "1")
 	if m != model:
 		if apartments.has(model):
@@ -268,7 +292,9 @@ func _use_apartment(fidx: int) -> void:
 		apps.assign(ap["apps"])
 		lift_label = ap["lift"]
 		spawn_pos = ap["spawn"]
+		lamps = ap["lamps"]
 		rig.bounds = ap["bounds"]
+		rig.scene_box = ap["box"]
 	_recolor(apartments[m], row.get("recolor", false))
 
 
@@ -284,16 +310,20 @@ func _build_apartment(m: String) -> Dictionary:
 	_build_furniture_colliders(ap, lvl)
 	ap["apps"] = _collect_appliances(ap)
 	ap["lift"] = _setup_lift_display(ap)
+	ap["lamps"] = []
 	for l in lvl.find_children("*", "OmniLight3D", true, false):
 		var ol := l as OmniLight3D
 		ol.light_energy = 0.9 * (GameConfig.COMPAT_LIGHTING["lamps"] if RenderingServer.get_current_rendering_method() == "gl_compatibility" else 1.0)
 		ol.omni_range = 2.4
 		ol.shadow_enabled = false
+		ap["lamps"].append([ol, ol.light_energy])
 	var size: Array = lay.get("size", [11, 8])
 	var w := float(size[0])
 	var h := float(size[1])
 	ap["size"] = Vector2(w, h)
 	ap["bounds"] = AABB(Vector3(0.6, 0, -(h - 0.6)), Vector3(w - 1.2, 0, h - 1.2))   # camera stays over the floor
+	var wall := float(lay.get("wall_height", 2.2))
+	ap["box"] = AABB(Vector3(0, -0.3, -h), Vector3(w, wall + 0.3, h))   # the whole apartment (floor slab .. walls)
 	ap["spawn"] = _bl(lay["spawn"])
 	# room materials for the second floor's colours (RECOLOR): wall_<room>, floor_<room>
 	var mats := {}
@@ -605,6 +635,7 @@ func _collect_appliances(ap: Dictionary) -> Array[Appliance]:
 		app.interact = _bl(a["interact_point"])
 		var box := _subtree_aabb(app.root) if app.root else AABB(app.pos, Vector3.ONE)
 		app.top_y = box.end.y + 0.45
+		app.box = box
 		app.pos = Vector3(box.get_center().x, 0.0, box.get_center().z)
 		app.setup_markers(ap["root"])
 		out.append(app)
@@ -612,8 +643,12 @@ func _collect_appliances(ap: Dictionary) -> Array[Appliance]:
 
 
 # ------------------------------------------------------------------ states
-func enter_select() -> void:
-	state = State.SELECT
+func enter_start() -> void:
+	## The start screen (Figma "Start game"; a player who has passed floors before: "Start game second", with the
+	## floor to continue from and "Restart game"). The child stands in the living room, the panel at the left.
+	state = State.START
+	if crazy:
+		crazy.gameplay_stop()
 	_use_apartment(0)
 	_set_lift_number(1)
 	_reset_appliances()
@@ -626,32 +661,46 @@ func enter_select() -> void:
 	rig.use_bounds = false
 	rig.height_offset = GameConfig.SELECT_HEIGHT
 	rig.snap()
-	hud.show_select(GameConfig.CHARACTERS[char_idx])
+	hud.show_start(_continue_floor() + 1)
 	music.power_up()
 	music.calm(0.8)
 
 
-func enter_name() -> void:
-	## First screen: nickname input (pre-filled with the last used name) + leaderboard.
-	enter_select()
-	state = State.NAME
-	hud.show_name(player_name if player_name != "" else save.last_name, save.entries)
+func _playable() -> int:
+	## This version's one character (GameConfig.PLAYABLE); the others stay in CHARACTERS for later.
+	for i in GameConfig.CHARACTERS.size():
+		if GameConfig.CHARACTERS[i]["id"] == GameConfig.PLAYABLE:
+			return i
+	return 0
 
 
-func _on_name_submitted(n: String) -> void:
-	player_name = n
-	save.set_last_name(n)
-	sfx.play("select")
-	enter_select()
+func _new_game(idx: int) -> void:
+	## Start / Restart game: a run from floor idx + 1.
+	total_stars = 0
+	run_passed_wh = 0.0
+	start_floor(idx)
+
+
+func _continue_floor() -> int:
+	## Floor (index) a player coming back continues from: the one they reached (a new player: floor 1).
+	return save.next_floor
+
+
+func _controls_due() -> bool:
+	## The controls are shown when a game starts until the first switch-off: for a new player (floor 1) and
+	## again on the first game of every new day; once done, not again that day.
+	return save.controls_day != Time.get_date_string_from_system()
 
 
 func _player() -> String:
-	return player_name if player_name != "" else "Гравець"
+	return player_name if player_name != "" else "Player"
 
 
 func start_floor(idx: int) -> void:
 	state = State.BUSY
 	floor_idx = idx
+	save.set_next_floor(idx)    # coming back later: this floor
+	_controls = _controls_due()
 	if idx == 0:
 		run_passed_wh = 0.0
 	await hud.fade_to(1.0, 0.3)
@@ -678,28 +727,17 @@ func start_floor(idx: int) -> void:
 	switched = 0
 	next_spawn = GameConfig.FIRST_SPAWN
 	countdown = 3.0
-	hud.show_play(idx + 1, GameConfig.FLOORS.size())
+	_plug_t = 0.0
+	player.speed = float(GameConfig.CHARACTERS[char_idx]["speed"]) * (1.0 + GameConfig.UPGRADE_SPEED * save.level("speed"))
+	hud.show_play(idx + 1)
 	_update_hud()
-	var fresh := _new_appliances(idx + 1)
-	_floor_sub = Lang.t("Поверх %d з %d") % [idx + 1, GameConfig.FLOORS.size()]
-	if not fresh.is_empty():
-		_floor_sub += " · " + fresh
-	hud.big(Lang.t("Поверх %d") % (idx + 1), fresh if fresh != "" else "Вимикай прилади, бережи енергію!")
+	hud.big("3")
 	music.power_up()
 	music.calm(1.0)
 	await hud.fade_to(0.0, 0.3)
 	state = State.COUNTDOWN
-
-
-func _new_appliances(floor_num: int) -> String:
-	## "Новий прилад: Праска · 1500 Вт" for appliances that join the game on this floor.
-	var names: Array[String] = []
-	for a in apps:
-		if a.min_floor == floor_num and floor_num > 1 and not a.never_off:
-			names.append(Lang.t("%s · %d Вт") % [Lang.t(a.label), int(a.power)])
-	if names.is_empty():
-		return ""
-	return Lang.t("Новий прилад: " if names.size() == 1 else "Нові прилади: ") + ", ".join(names)
+	if crazy:
+		crazy.gameplay_start()
 
 
 func _reset_appliances() -> void:
@@ -708,39 +746,72 @@ func _reset_appliances() -> void:
 
 
 func _set_blackout(on: bool) -> void:
+	_flick_left = 0.0
+	_set_lights(1.0)
 	sun.light_energy = 0.05 if on else _sun_energy
 	env.ambient_light_energy = 0.12 if on else _ambient_energy
 
 
+func _set_lights(k: float) -> void:
+	## Daylight and the lamps at share k (1 = normal): the flicker near overload.
+	sun.light_energy = _sun_energy * lerpf(1.0, k, 0.6)
+	env.ambient_light_energy = _ambient_energy * lerpf(1.0, k, 0.6)
+	for l in lamps:
+		(l[0] as OmniLight3D).light_energy = float(l[1]) * k
+
+
+func _update_flicker(delta: float, frac: float) -> void:
+	## Near the grid's limit the lights flicker now and then, more and more often; overloaded, they stutter.
+	var f := clampf((frac - GameConfig.FLICKER_FROM) / (1.0 - GameConfig.FLICKER_FROM), 0.0, 1.0)
+	if frac > 1.0:
+		f = 2.0
+	var was := _flick_left > 0.0
+	_flick_left = maxf(_flick_left - delta, 0.0)
+	if _flick_left <= 0.0 and f > 0.0 and rng.randf() < f * GameConfig.FLICKER_RATE * delta:
+		_flick_left = rng.randf_range(0.04, 0.13)
+		_flick_dim = rng.randf_range(0.25, 0.65)
+		if frac > 1.0:
+			sfx.play("spark")
+	if _flick_left > 0.0 or was:
+		_set_lights(_flick_dim if _flick_left > 0.0 else 1.0)
+
+
 func _cfg() -> Dictionary:
-	return GameConfig.FLOORS[floor_idx]
+	return GameConfig.floor_cfg(floor_idx)
+
+
+func _grace() -> float:
+	## Seconds of overload before the fuses blow: the floor's own + the stronger fuses bought.
+	return float(_cfg().get("grace", GameConfig.OVERLOAD_GRACE)) + GameConfig.FUSE_EXTRA * save.level("fuse")
 
 
 func _process(delta: float) -> void:
 	for a in apps:
 		a.update(delta, Time.get_ticks_msec() / 1000.0)
 	match state:
-		State.COUNTDOWN:
+		State.COUNTDOWN:   # 3, 2, 1, Start (Figma "Start"); then the controls if a game has just started
 			var before := int(ceil(countdown))
 			countdown -= delta
 			var now := int(ceil(countdown))
 			if countdown <= 0.0:
 				state = State.PLAY
 				player.input_enabled = true
-				hud.big("Старт!", "", hud.C_GREEN)
+				hud.big("Start")
 				sfx.play("go")
 				get_tree().create_timer(0.8).timeout.connect(_clear_go)
 			elif now != before or countdown > 2.99:
 				if now != before:
 					sfx.play("tick")
-				hud.big(str(now), _floor_sub)
+				hud.big(str(now))
 		State.PLAY:
 			_play_tick(delta)
 
 
 func _clear_go() -> void:
+	## "Start" goes; a game that has just started shows its controls now (Figma "Control").
 	if state == State.PLAY:
 		hud.big("")
+		hud.show_controls(_controls)
 
 
 func _play_tick(delta: float) -> void:
@@ -753,6 +824,7 @@ func _play_tick(delta: float) -> void:
 			_spawn_one()
 		var iv: Vector2 = cfg["interval"]
 		next_spawn = t + rng.randf_range(iv.x, iv.y)
+	_smart_plug(delta)
 	# energy
 	var load_w := 0.0
 	var switch_w := 0.0
@@ -768,14 +840,19 @@ func _play_tick(delta: float) -> void:
 	potential_wh += potential_rate_w * delta / 3600.0
 	# overload
 	var limit_kw: float = cfg["limit_kw"]
+	_update_flicker(delta, load_w / 1000.0 / limit_kw)
 	if load_w / 1000.0 > limit_kw:
+		if overload_t == 0.0:
+			hud.toast("Перевантаження!")
 		overload_t += delta
+		var danger := clampf(overload_t / _grace(), 0.0, 1.0)
+		rig.shake(0.02 + 0.05 * danger, 0.2)   # the floor trembles, harder as the fuses near their end
 		alarm_t -= delta
 		if alarm_t <= 0.0:
 			sfx.play("alarm")
 			hud.overload(true)
 			alarm_t = 0.4
-		if overload_t >= float(cfg.get("grace", GameConfig.OVERLOAD_GRACE)):
+		if overload_t >= _grace():
 			_finish(false, "Коротке замикання! Вибило пробки.", true)
 			return
 	else:
@@ -791,11 +868,37 @@ func _play_tick(delta: float) -> void:
 					int(near.power)])
 	else:
 		hud.prompt("")
+	if _controls:
+		hud.prompt("")   # the controls at the bottom say it (the space bar)
 	_update_hud(load_w, on_count)
 	_update_indicators()
 	_update_music(load_w, on_count)
 	if t >= GameConfig.ROUND_TIME:
 		_end_round()
+
+
+func _smart_plug(delta: float) -> void:
+	## The smart plug (an upgrade): after PLUG_INTERVAL seconds of something being on it switches off the appliance
+	## that has been on longest (not the one the player is switching off right now).
+	var lvl: int = save.level("plug")
+	if lvl <= 0:
+		return
+	var oldest: Appliance = null
+	for a in apps:
+		if a.is_on and not a.never_off and a != _switch_target and (oldest == null or a.t_on < oldest.t_on):
+			oldest = a
+	if oldest == null:
+		return
+	_plug_t += delta
+	if _plug_t < float(GameConfig.PLUG_INTERVAL[mini(lvl, GameConfig.PLUG_INTERVAL.size() - 1)]):
+		return
+	_plug_t = 0.0
+	oldest.set_on(false, t)
+	switched += 1
+	sfx.play("off")
+	Effects.burst(self, oldest.top(), 18, 0.9, true)
+	_fly_power(oldest)
+	hud.toast("Розумна розетка!")
 
 
 func _update_music(load_w: float, on_count: int) -> void:
@@ -824,10 +927,8 @@ func _economy() -> float:
 	return clampf(1.0 - consumed_wh / potential_wh, 0.0, 1.0)
 
 
-func _update_hud(load_w := 150.0, on_count := 0) -> void:
-	var cfg := _cfg()
-	hud.update_play(GameConfig.ROUND_TIME - t, load_w / 1000.0, cfg["limit_kw"], consumed_wh + fridge_wh,
-			_economy(), cfg["threshold"], on_count)
+func _update_hud(load_w := 150.0, _on_count := 0) -> void:
+	hud.update_play(load_w / 1000.0, _cfg()["limit_kw"])
 
 
 func _spawn_one() -> void:
@@ -862,10 +963,18 @@ func _spawn_one() -> void:
 	if on_count >= int(cfg["max_on"]) or cands.is_empty():
 		return
 	var a: Appliance = cands[rng.randi() % cands.size()]
+	if _controls and spawned == 0:   # a game starting: the first one switches on close by
+		var best := INF
+		for c in cands:
+			var d := _route_len(player.global_position, c)
+			if d < best:
+				best = d
+				a = c
 	a.set_on(true, t)
 	potential_rate_w += a.power
 	spawned += 1
 	sfx.play("beep")
+	Effects.burst(self, a.top(), 10, 0.8, false)   # it jumps to life with a few sparks
 	fx.glitch(GameConfig.GLITCH_STRENGTH, GameConfig.GLITCH_TIME)
 
 
@@ -907,8 +1016,13 @@ func _on_switch_hit() -> void:
 	if a and a.is_on and state == State.PLAY:
 		a.set_on(false, t)
 		switched += 1
-		sfx.play("click")
+		sfx.play("off")   # click + the power winding down
+		Effects.burst(self, a.top(), 26, 1.1, true)
 		_fly_power(a)
+		if _controls:   # the first appliance switched off: the controls have done their job (for today)
+			_controls = false
+			hud.show_controls(false)
+			save.set_controls_day(Time.get_date_string_from_system())
 
 
 func _fly_power(a: Appliance) -> void:
@@ -946,7 +1060,13 @@ func _menu_zoom() -> float:
 
 
 func _finish(win: bool, reason: String, blackout := false) -> void:
+	## A floor's end: Figma "Success" (stars, energy used, savings; Next floor / Restart game) or "Fail" (the same
+	## and the floor; Start = try it again / Restart game).
 	state = State.RESULT
+	_flick_left = 0.0
+	_set_lights(1.0)
+	if crazy:
+		crazy.gameplay_stop()
 	_last_reason = reason
 	_result_camera()
 	result_win = win
@@ -962,6 +1082,7 @@ func _finish(win: bool, reason: String, blackout := false) -> void:
 		if econ >= thr + 0.20 and overload_t == 0.0:
 			stars = 3
 		total_stars += stars
+		_record_win(stars)
 		if not (music.enabled and music.has_track("victory")):
 			sfx.play("win")   # the victory fanfare replaces the beep jingle
 		player.celebrate()
@@ -970,8 +1091,14 @@ func _finish(win: bool, reason: String, blackout := false) -> void:
 	if not win and (blackout or not (music.enabled and music.has_track("defeat"))):
 		sfx.play("lose")   # the sad music replaces the beep (after a short circuit both are heard)
 	if blackout:
+		# the fuses blow: a bang, sparks fly off everything that was on, a white flash, the view jolts, darkness
+		sfx.play("bang")
 		for a in apps:
+			if a.is_on:
+				Effects.burst(self, a.top(), 26, 2.0, true)
 			a.set_on(false, t)
+		rig.shake(0.3, 0.8)
+		hud.flash_white()
 		_set_blackout(true)
 		music.power_down()
 		music.defeat(1.4)   # sad music once the "tape stop" has died away
@@ -984,50 +1111,30 @@ func _finish(win: bool, reason: String, blackout := false) -> void:
 	var run_score := run_passed_wh + attempt_saved
 	if win:
 		run_passed_wh += attempt_saved
-	var rank: int = save.submit(_player(), run_score, floor_idx + 1, GameConfig.CHARACTERS[char_idx]["id"])
-	var lines: Array = []
-	if reason != "":
-		lines.append(Lang.t(reason))
-	lines.append(Lang.t("Зекономлено: %.1f Вт • год") % attempt_saved)
-	lines.append(Lang.t("Економія %d%%  (потрібно ≥ %d%%)") % [roundi(econ * 100), roundi(thr * 100)])
-	var best: float = save.best_of(_player())
-	if best > run_score + 0.05:
-		lines.append(Lang.t("Рахунок гри: %.1f Вт • год  (рекорд %.1f)") % [run_score, best])
-	else:
-		lines.append(Lang.t("Рахунок гри: %.1f Вт • год  — новий рекорд!") % run_score if run_score > 0.0 else Lang.t("Рахунок гри: 0 Вт • год"))
-	lines.append(Lang.t("Місце в рейтингу: %d") % rank)
-	var last := floor_idx >= GameConfig.FLOORS.size() - 1
-	var hints: Array = []
-	if win:
-		hints.append(["Enter", "до фіналу" if last else "щоб продовжити", true])
-	else:
-		hints.append(["Enter", "спробувати ще раз", true])
-	hints.append(["Esc", "спочатку"])
-	hud.show_result(win, "Поверх пройдено!" if win else "Поверх не пройдено!", lines, stars, hints)
-	hud.show_leaderboard(save.entries, _player())
+	save.submit(_player(), run_score, floor_idx + 1, GameConfig.CHARACTERS[char_idx]["id"])
+	save.add_bank(attempt_saved * (1.0 if win else GameConfig.FAIL_BANK_SHARE))   # the energy bank (upgrades)
+	if win and floor_idx == GameConfig.FLOORS.size() - 1 and crazy:
+		crazy.happytime()   # the whole building saved
+	_controls = false
+	var buttons := [["Next floor" if win else "Start", true, "confirm"], ["Restart game", false, "restart"]]
+	hud.show_result(win, stars, consumed_wh + fridge_wh, econ, floor_idx + 1, buttons)
 
 
-func _show_complete() -> void:
-	state = State.COMPLETE
-	music.victory()   # keeps playing from the last floor's result screen
-	_result_camera()
-	hud.show_result(true, "Будинок врятовано!",
-			[Lang.t("Ви пройшли всі %d поверхів.") % GameConfig.FLOORS.size(),
-			 Lang.t("Зірок зібрано: %d з %d") % [total_stars, GameConfig.FLOORS.size() * 3],
-			 Lang.t("Рахунок гри: %.1f Вт • год") % run_passed_wh,
-			 Lang.t("Місце в рейтингу: %d") % save.rank_of(_player())],
-			clampi(roundi(3.0 * total_stars / (GameConfig.FLOORS.size() * 3.0)), 1, 3),
-			[["Enter", "щоб грати знову", true], ["Esc", "спочатку"]])
-	hud.show_leaderboard(save.entries, _player())
+func _record_win(stars: int) -> void:
+	## A passed floor: its stars (best kept), the highest floor passed and the next one (the start screen continues
+	## from it).
+	save.next_floor = floor_idx + 1   # coming back later: the next floor
+	if floor_idx < GameConfig.FLOORS.size():
+		save.record_floor(floor_idx + 1, stars)
+	else:
+		save.best_floor = maxi(save.best_floor, floor_idx + 1)
+		save.save_data()
 
 
 # ------------------------------------------------------------------ input
 func _unhandled_input(event: InputEvent) -> void:
 	if event.is_action_pressed("music") and not event.is_echo():
 		hud.toast(Lang.t("Музика: %s") % Lang.t("увімкнено" if music.toggle() else "вимкнено"))
-		return
-	if event.is_action_pressed("language") and not event.is_echo() and state in [State.NAME, State.SELECT]:
-		_switch_language()   # L in the menu (not while typing the name: the field takes the key)
 		return
 	# zoom: + / - keys or mouse wheel (during play)
 	if state == State.PLAY or state == State.COUNTDOWN:
@@ -1048,64 +1155,25 @@ func _unhandled_input(event: InputEvent) -> void:
 	if event.is_echo():
 		return
 	match state:
-		State.NAME:
-			# the touch button (or Enter when the name field has lost focus) submits the name
-			if event.is_action_pressed("confirm"):
-				hud.submit_name()
-		State.SELECT:
-			var n := GameConfig.CHARACTERS.size()
-			if event.is_action_pressed("back"):
-				enter_name()
-				return
-			if event.is_action_pressed("move_left"):
-				char_idx = (char_idx - 1 + n) % n
-				_refresh_select()
-			elif event.is_action_pressed("move_right"):
-				char_idx = (char_idx + 1) % n
-				_refresh_select()
-			elif event.is_action_pressed("confirm") or event.is_action_pressed("interact"):
-				total_stars = 0
-				start_floor(0)
+		State.START:   # Start (Enter / Space / the button), Restart game (R / the button)
+			if event.is_action_pressed("confirm") or event.is_action_pressed("interact"):
+				_new_game(_continue_floor())
+			elif event.is_action_pressed("restart"):
+				_new_game(0)
 		State.PLAY:
 			if event.is_action_pressed("interact") or event.is_action_pressed("confirm"):
 				_try_interact()   # Space, or Enter / the touch button
 			elif event.is_action_pressed("restart"):
 				start_floor(floor_idx)
 			elif event.is_action_pressed("back"):
-				enter_select()
-		State.RESULT:
-			if event.is_action_pressed("confirm"):
-				if result_win:
-					if floor_idx >= GameConfig.FLOORS.size() - 1:
-						_show_complete()
-					else:
-						start_floor(floor_idx + 1)
-				else:
-					start_floor(floor_idx)
+				enter_start()
+		State.RESULT:   # Next floor / Start (try again) (Enter, the button), Restart game (R, the button)
+			if event.is_action_pressed("confirm") or event.is_action_pressed("interact"):
+				start_floor(floor_idx + 1 if result_win else floor_idx)
+			elif event.is_action_pressed("restart"):
+				_new_game(0)
 			elif event.is_action_pressed("back"):
-				enter_select()
-		State.COMPLETE:
-			if event.is_action_pressed("confirm"):
-				total_stars = 0
-				start_floor(0)
-			elif event.is_action_pressed("back"):
-				enter_select()
-
-
-func _switch_language() -> void:
-	Lang.toggle()
-	DisplayServer.window_set_title(Lang.t("Енергетична криза"))
-	hud.relabel()
-	if state == State.SELECT:
-		hud.show_select(GameConfig.CHARACTERS[char_idx])
-	sfx.play("select")
-	hud.toast("Мова: українська" if Lang.code == "uk" else "Language: English")
-
-
-func _refresh_select() -> void:
-	sfx.play("select")
-	player.setup(GameConfig.CHARACTERS[char_idx])
-	hud.show_select(GameConfig.CHARACTERS[char_idx])
+				enter_start()
 
 
 # ------------------------------------------------------------------ autotest (headless / CI)
@@ -1117,67 +1185,83 @@ func _shot(name: String) -> void:
 	print("shot ", name)
 
 
-func _run_select_shots(dir: String) -> void:
-	## Screenshots of the menu for every character: with the menu card and clean (no UI).
+func _run_ui_shots(dir: String) -> void:
+	## The six screens of the Figma redesign (KeyLock 48:2814): start (first visit), the countdown's "Start", the
+	## controls, success, fail, the start screen for a player coming back.
 	_auto_shots = dir
-	state = State.SELECT
 	await get_tree().create_timer(1.0).timeout
-	for ci in GameConfig.CHARACTERS.size():
-		char_idx = ci
-		_refresh_select()
-		await get_tree().create_timer(1.2).timeout
-		var id: String = GameConfig.CHARACTERS[ci]["id"]
-		await _shot("select_%d_%s" % [ci + 1, id])
-		hud.hide_sheet()
-		rig.snap()
+	await _shot("ui_1_start")
+	_new_game(0)
+	while state != State.COUNTDOWN:
 		await get_tree().process_frame
-		await _shot("select_%d_%s_clean" % [ci + 1, id])
-	# the sheet sliding in (from the left; from below on a phone)
-	hud.show_select(GameConfig.CHARACTERS[char_idx])
-	for k in 4:
-		await get_tree().create_timer(0.08).timeout
-		await _shot("select_slide_%d" % (k + 1))
-	# L: the other language on the spot
+	while state == State.COUNTDOWN:
+		await get_tree().process_frame
+	next_spawn = 999.0
+	await get_tree().create_timer(0.15).timeout
+	await _shot("ui_2_countdown_start")
 	await get_tree().create_timer(1.0).timeout
-	_switch_language()
-	await get_tree().create_timer(0.3).timeout
-	await _shot("select_lang_switched")
+	await _shot("ui_3_controls")
+	potential_wh = 19.0   # the mockup's numbers: 4.9 Wh used, 74 % saved
+	consumed_wh = 4.9
+	fridge_wh = 0.0
+	t = GameConfig.ROUND_TIME
+	_finish(true, "")
+	await get_tree().create_timer(1.6).timeout
+	await _shot("ui_4_success")
+	start_floor(1)
+	while state != State.PLAY:
+		await get_tree().process_frame
+	potential_wh = 19.0
+	consumed_wh = 4.9
+	fridge_wh = 0.0
+	t = GameConfig.ROUND_TIME
+	_finish(false, "Не всі прилади вимкнені.")
+	await get_tree().create_timer(1.6).timeout
+	await _shot("ui_5_fail")
+	enter_start()
+	await get_tree().create_timer(1.2).timeout
+	await _shot("ui_6_start_second")
 	get_tree().quit()
 
 
-func _prep_result(fidx: int, pos: Vector3, on_ids: Array) -> void:
-	## Put the game into a mid-round state for a results screenshot (demo values).
-	floor_idx = fidx
-	_use_apartment(fidx)
-	if model != "1":
-		pos = spawn_pos + Vector3(1.6, 0.0, 0.0)   # in front of the lift (the demo spot is floor 1's)
-	_set_lift_number(fidx + 1)
-	state = State.PLAY
-	_set_blackout(false)
-	hud.show_play(fidx + 1, GameConfig.FLOORS.size())
-	hud.big("")
-	_reset_appliances()
+func _run_fx_shots(dir: String) -> void:
+	## The effects: appliances on (halo, sparks, steam), a switch-off burst, an overload (flicker, shaking meter,
+	## red flash), the fuses blowing (flash, sparks) and the darkness after.
+	_auto_shots = dir
+	await get_tree().create_timer(0.5).timeout
+	player.setup(GameConfig.CHARACTERS[char_idx])
+	start_floor(0)
+	while state != State.PLAY:
+		await get_tree().process_frame
+	next_spawn = 999.0
+	var tv: Appliance = null
 	for a in apps:
-		if on_ids.has(a.id):
-			a.set_on(true, 30.0)
-	player.position = pos
-	player.velocity = Vector3.ZERO
-	player._cur_anim = ""
-	player.face_camera()
-	player.play("idle")
-	rig.zoom = GameConfig.CAMERA_ZOOM
-	rig.use_bounds = true
-	rig.height_offset = 0.5
-	rig.snap()
-	t = GameConfig.ROUND_TIME
-
-
-func _freeze_pose(time: float, anim_name := "celebrate") -> void:
-	## Hold an animation at a fixed moment (arms up / torso twisted) for screenshots.
-	if player.anim and player.anim.has_animation(anim_name):
-		player.anim.play(anim_name, 0.0)
-		player.anim.seek(time, true)
-		player.anim.speed_scale = 0.0
+		if a.id in ["tv", "floor_lamp", "kettle"]:
+			a.set_on(true, t)
+			potential_rate_w += a.power
+		if a.id == "tv":
+			tv = a
+	await get_tree().create_timer(1.5).timeout
+	await _shot("fx_1_on")
+	player.global_position = Vector3(tv.interact.x, player.global_position.y, tv.interact.z)
+	_try_interact()
+	while switched == 0:
+		await get_tree().process_frame
+	await get_tree().create_timer(0.08).timeout
+	await _shot("fx_2_off")
+	await get_tree().create_timer(1.2).timeout
+	for a in apps:
+		if not a.never_off:
+			a.set_on(true, t)
+	await get_tree().create_timer(0.7).timeout
+	await _shot("fx_3_overload")
+	while state == State.PLAY:
+		await get_tree().process_frame
+	await get_tree().create_timer(0.1).timeout
+	await _shot("fx_4_blow")
+	await get_tree().create_timer(1.5).timeout
+	await _shot("fx_5_dark")
+	get_tree().quit()
 
 
 func _run_floor_shots(dir: String) -> void:
@@ -1216,30 +1300,29 @@ func _exit_tree() -> void:
 			r.free()
 
 
-func _run_fail_shots(dir: String) -> void:
-	## Every character on the "floor failed" screen, at two moments of the despair loop.
-	_auto_shots = dir
-	player_name = "Олексій"
-	await get_tree().create_timer(0.5).timeout
-	for ci in GameConfig.CHARACTERS.size():
-		char_idx = ci
-		player.setup(GameConfig.CHARACTERS[ci])
-		_prep_result(0, Vector3(2.6, 0.0, -2.2), ["tv"])
-		spawned = 6; switched = 5; consumed_wh = 3.0; potential_wh = 7.0; fridge_wh = 2.0
-		_end_round()
-		await get_tree().create_timer(1.0).timeout
-		for k in 2:
-			_freeze_pose(0.42 if k == 0 else 1.25, "fail")
-			await get_tree().create_timer(0.2).timeout
-			await _shot("fail_%d_%s_%d" % [ci + 1, GameConfig.CHARACTERS[ci]["id"], k + 1])
-		player.anim.speed_scale = 1.0
-	get_tree().quit()
-
-
 func _run_og_shot(path: String) -> void:
 	## Picture for the web page's link preview (src/web/og.py adds the title): the whole family in the living
 	## room, in the right part of the frame (the left part is left for the text). Saved at 1200 x 630.
-	get_window().size = Vector2i(1200, 630)
+	## The same for the CrazyGames covers (src/web/covers.py adds the title), with -- --fill-frame and:
+	##   --shot-size=WxH   picture size (1200x630)
+	##   --shot-panel=P    share of the width kept free on the left for the text (500 / 1200)
+	##   --shot-top=T      share of the height kept free at the top for the title (0)
+	##   --shot-zoom=Z     metres of the scene in the free part's height (3.0)
+	var size := Vector2i(1200, 630)
+	var panel_share := 500.0 / 1200.0
+	var top_share := 0.0
+	var zoom := 3.0
+	for a in OS.get_cmdline_user_args():
+		if a.begins_with("--shot-size="):
+			var wh := a.substr(12).split("x")
+			size = Vector2i(int(wh[0]), int(wh[1]))
+		elif a.begins_with("--shot-panel="):
+			panel_share = float(a.substr(13))
+		elif a.begins_with("--shot-top="):
+			top_share = float(a.substr(11))
+		elif a.begins_with("--shot-zoom="):
+			zoom = float(a.substr(12))
+	get_window().size = size
 	await get_tree().create_timer(0.5).timeout
 	hud.hide_sheet()
 	hud.visible = false
@@ -1260,13 +1343,14 @@ func _run_og_shot(path: String) -> void:
 		p.position = GameConfig.SELECT_POS + right * float(g[1]) + front * float(g[2])
 		p.face_camera()
 	rig.target = null
-	rig.zoom = 3.0
+	rig.zoom = zoom
 	rig.use_bounds = false
 	rig.global_position = GameConfig.SELECT_POS + Vector3(0, GameConfig.SELECT_HEIGHT, 0)
 	await get_tree().create_timer(0.3).timeout
 	var f: Rect2 = screen_layout.frame
-	var panel: float = 500.0 * screen_layout.screen.x / 1200.0
-	rig.view = Rect2(f.position + Vector2(panel, 0), f.size - Vector2(panel, 0))
+	var panel: float = panel_share * screen_layout.screen.x
+	var top: float = top_share * screen_layout.screen.y
+	rig.view = Rect2(f.position + Vector2(panel, top), f.size - Vector2(panel, top))
 	rig._size = rig.zoom
 	rig._apply_frame()
 	await get_tree().create_timer(1.5).timeout
@@ -1277,8 +1361,8 @@ func _run_og_shot(path: String) -> void:
 
 
 func _run_stick_shots(dir: String) -> void:
-	## The touch stick (run with --touch): the select screen (a push to the right = next character), then play:
-	## pushes of different strength, the player's speed for each, a screenshot with the stick held.
+	## The touch stick (run with --touch): the start screen, then play: pushes of different strength, the
+	## player's speed for each, a screenshot with the stick held.
 	_auto_shots = dir
 	await get_tree().create_timer(0.3).timeout   # the layout is made a frame after start
 	var pad: Object = screen_layout.pad
@@ -1300,17 +1384,8 @@ func _run_stick_shots(dir: String) -> void:
 		ev.index = 0
 		ev.position = to_window * p
 		Input.parse_input_event(ev)
-	_on_name_submitted("Тест")
 	await get_tree().create_timer(0.8).timeout
-	var before := char_idx
-	touch.call(true, c)
-	for k in 10:   # a slow push to the right: one "next character", however many drag events
-		drag.call(c + Vector2(travel * (k + 1) / 10.0, 0))
-		await get_tree().process_frame
-	await _shot("stick_1_select_right")
-	touch.call(false, c + Vector2(travel, 0))
-	print("stick: select ", before, " -> ", char_idx)
-	await get_tree().create_timer(0.3).timeout
+	await _shot("stick_1_start")
 	await start_floor(0)
 	state = State.PLAY
 	hud.big("")
@@ -1329,99 +1404,6 @@ func _run_stick_shots(dir: String) -> void:
 		await get_tree().create_timer(0.2).timeout
 	print("stick: released -> speed %.2f" % player.velocity.length())
 	await _shot("stick_3_released")
-	get_tree().quit()
-
-
-func _run_result_shots(dir: String) -> void:
-	_auto_shots = dir
-	# demo leaderboard (separate save file, the real one is untouched)
-	save.entries = [
-		{"name": "Ярина", "score": 48.6, "date": "1"}, {"name": "Max", "score": 41.2, "date": "2"},
-		{"name": "Котик", "score": 35.9, "date": "3"}, {"name": "Дмитро", "score": 27.4, "date": "4"},
-		{"name": "Ніна", "score": 19.8, "date": "5"}, {"name": "Bogdan", "score": 12.5, "date": "6"},
-		{"name": "Олексій", "score": 9.1, "date": "7"}]
-	player_name = "Олексій"
-	enter_name()
-	await get_tree().create_timer(1.0).timeout
-	await _shot("name_1_input")
-	_on_name_submitted("Олексій")
-	char_idx = 0
-	_refresh_select()
-	await start_floor(6)   # floor 7: countdown announces the new appliance (heater)
-	await get_tree().create_timer(0.6).timeout
-	await _shot("play_0_countdown_new_appliance")
-	await start_floor(0)
-	var pos := Vector3(2.6, 0.0, -2.2)
-	# 0) in-game HUD and the noise burst when an appliance switches on
-	_prep_result(0, pos, ["tv", "floor_lamp"])
-	state = State.BUSY
-	t = 11.0
-	spawned = 3; switched = 1; consumed_wh = 1.6; potential_wh = 3.3; fridge_wh = 0.5
-	_update_hud(400.0, 2)
-	_update_indicators()
-	hud.prompt(Lang.t("Нажміть [color=#ffae00]%s[/color] щоб вимкнути: %s · %d Вт") % [hud.key_name("Пробіл"), Lang.t("Телевізор"), 150])
-	await get_tree().create_timer(0.8).timeout
-	await _shot("play_1_hud")
-	fx.glitch(GameConfig.GLITCH_STRENGTH, 3.0)   # same strength as in game, held longer for the shot
-	await get_tree().create_timer(0.15).timeout
-	await _shot("play_2_glitch")
-	hud.prompt("")
-	await get_tree().create_timer(0.4).timeout
-	# switching off the floor lamp: its power flies into the economy label
-	for a in apps:
-		if a.id == "floor_lamp":
-			a.set_on(false, t)
-			_fly_power(a)
-	_update_indicators()
-	var k := 0
-	for dt in [0.15, 0.3, 0.3, 0.25]:   # rise, start of the flight, mid-flight, arrival
-		await get_tree().create_timer(dt).timeout
-		k += 1
-		await _shot("play_3_power_fly_%d" % k)
-	await get_tree().create_timer(0.6).timeout
-	# 1) floor passed, 3 stars
-	_prep_result(0, pos, [])
-	spawned = 8; switched = 8; consumed_wh = 2.4; potential_wh = 9.1; fridge_wh = 2.5; overload_t = 0.0
-	_update_hud(150.0, 0)
-	_end_round()
-	await get_tree().create_timer(1.2).timeout
-	_freeze_pose(0.28)   # arms up
-	await get_tree().create_timer(0.3).timeout
-	await _shot("result_1_passed")
-	player.anim.speed_scale = 1.0
-	# 2) floor failed: appliances still on at the end
-	_prep_result(1, pos, ["tv", "kettle"])
-	spawned = 10; switched = 8; consumed_wh = 4.9; potential_wh = 9.6; fridge_wh = 2.5; overload_t = 0.0
-	_update_hud(2300.0, 2)
-	_end_round()
-	await get_tree().create_timer(1.0).timeout
-	_freeze_pose(0.42, "fail")   # torso twisted to one side
-	await get_tree().create_timer(0.3).timeout
-	await _shot("result_2_failed")
-	player.anim.speed_scale = 1.0
-	# 3) short circuit (fuses blown -> blackout)
-	_prep_result(2, pos, ["kettle", "iron", "hair_dryer"])
-	spawned = 9; switched = 5; consumed_wh = 6.3; potential_wh = 10.8; fridge_wh = 1.6
-	t = 37.0
-	_update_hud(5450.0, 3)
-	_finish(false, "Коротке замикання! Вибило пробки.", true)
-	await get_tree().create_timer(1.0).timeout
-	_freeze_pose(1.25, "fail")   # twisted to the other side
-	await get_tree().create_timer(0.3).timeout
-	await _shot("result_3_short_circuit")
-	player.anim.speed_scale = 1.0
-	# 4) whole building completed
-	_prep_result(GameConfig.FLOORS.size() - 1, pos, [])
-	spawned = 26; switched = 26; consumed_wh = 7.9; potential_wh = 31.0; fridge_wh = 2.5
-	_update_hud(150.0, 0)
-	total_stars = 26
-	player.celebrate()
-	_show_complete()
-	await get_tree().create_timer(1.2).timeout
-	_freeze_pose(0.28)   # arms up
-	await get_tree().create_timer(0.3).timeout
-	await _shot("result_4_completed")
-	player.anim.speed_scale = 1.0
 	get_tree().quit()
 
 
@@ -1683,14 +1665,13 @@ func _path_len(p: PackedVector2Array) -> float:
 func _run_autotest() -> void:
 	print("AUTOTEST start; appliances=", apps.size())
 	await get_tree().create_timer(0.5).timeout
-	await _shot("01_select")
-	for ci in GameConfig.CHARACTERS.size():
-		char_idx = ci
-		_refresh_select()
+	await _shot("01_start")
+	for ci in GameConfig.CHARACTERS.size():   # every character still loads (for later updates)
+		player.setup(GameConfig.CHARACTERS[ci])
 		await get_tree().process_frame
-	char_idx = clampi(_bot_char, 0, GameConfig.CHARACTERS.size() - 1)
-	_refresh_select()
-	Engine.time_scale = 1.0 if _auto_shots != "" else 6.0
+	char_idx = clampi(_bot_char, 0, GameConfig.CHARACTERS.size() - 1) if _bot_char >= 0 else _playable()
+	player.setup(GameConfig.CHARACTERS[char_idx])
+	Engine.time_scale = 1.0 if _auto_shots != "" or _video else 6.0
 	if not _physical:
 		player.collision_mask = 0   # the bot follows its route exactly (_bot_route keeps it off walls and furniture)
 	var passed := 0
@@ -1700,6 +1681,8 @@ func _run_autotest() -> void:
 		start_floor(f)
 		while state != State.PLAY:
 			await get_tree().process_frame
+		if _video:
+			next_spawn = t + 0.3   # something to switch off right away
 		bot_target = null
 		_bot_report_routes()
 		var shot_done := false
@@ -1744,7 +1727,7 @@ func _run_autotest() -> void:
 		var c := _cfg()
 		print("FLOOR %d -> win=%s econ=%.2f (thr %.2f) spawned=%d switched=%d wh=%.2f t=%.1f | interval %s max_on %d limit %.1f double %.2f | %s" % [
 			f + 1, result_win, _economy(), c["threshold"], spawned, switched, consumed_wh, t,
-			c["interval"], c["max_on"], c["limit_kw"], c["double"], _last_reason if not result_win else _new_appliances(f + 1)])
+			c["interval"], c["max_on"], c["limit_kw"], c["double"], _last_reason])
 		if result_win:
 			passed += 1
 		print("  music: streams=%s playing=%s intensity=%.2f vols=%s pitch=%.2f | result track=%s %s" % [

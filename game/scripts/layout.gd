@@ -1,7 +1,7 @@
 extends Node
-## Adaptive layout (Figma "iPhone 17 - 1", node 29:2): the game is shown in a rounded frame on a light
-## background, and the frame follows the window:
-##   * landscape (desktop): the frame fills the window, with a small margin all round;
+## Adaptive layout (Figma "iPhone 17 - 1", node 29:2): the game is shown in a frame on a light background, and the
+## frame follows the window, edge to edge (no margin, square corners: FRAME_MARGIN / FRAME_RADIUS in config.gd):
+##   * landscape (desktop): the frame fills the window;
 ##   * portrait (phone): the frame takes the top half, the touch controls (stick + two buttons) sit below it;
 ##   * landscape on a touch screen: the frame in the middle, the stick on the left, the buttons on the right.
 ## The 3D view renders the whole window; the camera is shifted and zoomed so the scene sits in the frame
@@ -94,9 +94,13 @@ func relayout() -> void:
 	var area := Rect2(ins[0], ins[1], W - ins[0] - ins[2], H - ins[1] - ins[3])
 	var D: Dictionary = GameConfig.TOUCH_LAYOUT   # mockup measurements (402 px wide phone)
 	var buttons := {}
+	var fill := OS.get_cmdline_user_args().has("--fill-frame")   # covers / trailers: the game over the whole window
+	var edge := fill   # covers / trailers: no margin or rounded corners even if the settings ask for them
+	if edge:
+		m = 0.0
 	var por := _portrait(area, m, D)
-	var lan := _landscape_touch(area, m, D) if _touch() else {}
-	var portrait := area.size.y > area.size.x * 1.1
+	var lan := _landscape_touch(area, m, D) if _touch() and not fill else {}
+	var portrait := area.size.y > area.size.x * 1.1 and not fill
 	if not lan.is_empty() and not portrait:
 		# a touch screen: controls below the frame or at its sides, whichever leaves the bigger game frame
 		var a_por: float = por["frame"].size.x * minf(por["frame"].size.y, por["frame"].size.x * 9.0 / 16.0)
@@ -115,7 +119,7 @@ func relayout() -> void:
 		frame = Rect2(area.position.x + m, area.position.y + m, area.size.x - 2.0 * m, area.size.y - 2.0 * m)
 	touch_hints = _touch()
 	hud_scale = minf(frame.size.x / GameConfig.UI_REF_SIZE.x, frame.size.y / GameConfig.UI_REF_SIZE.y)
-	var radius := GameConfig.FRAME_RADIUS * minf(frame.size.x, frame.size.y)
+	var radius := 0.0 if edge else GameConfig.FRAME_RADIUS * minf(frame.size.x, frame.size.y)
 	_mat.set_shader_parameter("screen", screen)
 	_mat.set_shader_parameter("frame", Vector4(frame.position.x, frame.position.y, frame.size.x, frame.size.y))
 	_mat.set_shader_parameter("radius", radius)
