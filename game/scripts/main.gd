@@ -155,6 +155,8 @@ func _ready() -> void:
 	if not demo:
 		await _warm_up()
 	enter_start()   # one click (Start) from the game
+	if OS.has_feature("web"):   # the page's loader (html/head_include) stays until the start page is there
+		JavaScriptBridge.eval("if (window.ecReady) { window.ecReady(); }", true)
 	for arg in args:
 		if arg.begins_with("--ui-shots="):
 			_run_ui_shots(arg.substr(11))
