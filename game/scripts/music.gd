@@ -105,8 +105,25 @@ func _load(layer: String) -> AudioStream:
 			w.loop_begin = int(from * w.mix_rate)
 			w.loop_end = int(w.get_length() * w.mix_rate)
 		return s
+	if not ResourceLoader.exists("res://assets/models/apartment/floor2.glb"):
+		return null   # the CrazyGames build: this track comes later with the extra pack (packs.gd)
 	push_warning("Music layer not found: assets/music/%s.(ogg|wav|mp3)" % layer)
 	return null
+
+
+## The extra pack has arrived (packs.gd): the tracks that were missing start now. The three round songs are
+## unrelated pieces that only crossfade, so a song starting later than the others is fine.
+func reload_missing() -> void:
+	for k in LAYERS.size():
+		var p := players[k]
+		if p.stream == null:
+			p.stream = _load(LAYERS[k])
+			if p.stream:
+				p.play()
+	for track in RESULT_TRACKS:
+		var rp: AudioStreamPlayer = result_players[track]
+		if rp.stream == null:
+			rp.stream = _load(track)
 
 
 ## Called every frame during a round.

@@ -21,6 +21,8 @@ var sfx: Sfx
 var steps   # scripts/footsteps.gd
 var fx: ScreenFx
 var music   # Music (scripts/music.gd); preloaded so it works before the editor refreshes its class list
+var packs   # scripts/packs.gd: the second pack of the CrazyGames build (other apartments, more music)
+var _loading_lbl: Label     # "Loading…" over the dark screen while a floor waits for that pack
 var screen_layout   # scripts/layout.gd: the game frame on the background + touch controls (adapts to the window)
 var sun: DirectionalLight3D
 var env: Environment
@@ -56,7 +58,7 @@ var result_win := false
 # switches on next to the player, until the first appliance is switched off
 var _controls := false
 var _demo := false         # screenshot / test run (separate save)
-var _char_scenes: Array = []   # the four characters' models, loaded once: switching characters must not reload them
+var _char_scenes: Array = []   # characters' models (only the playable one in this version; null for the others)
 var _switch_target: Appliance
 
 # --- automated test mode (godot -- --autotest) -----------------------------
@@ -115,6 +117,11 @@ func _ready() -> void:
 	add_child(fx)
 	music = preload("res://scripts/music.gd").new()
 	add_child(music)
+	packs = preload("res://scripts/packs.gd").new()
+	add_child(packs)
+	packs.finished.connect(func(ok: bool) -> void:
+		if ok:
+			music.reload_missing())   # tension, urgent, victory, defeat come with the extra pack
 	rig = CameraRig.new()
 	add_child(rig)
 	player = Player.new()
@@ -150,11 +157,13 @@ func _ready() -> void:
 	if Crazy.enabled and crazy and crazy.username != "":
 		player_name = crazy.username
 	char_idx = _playable()
-	for c in GameConfig.CHARACTERS:
-		_char_scenes.append(load(c["file"]))
+	for c in GameConfig.CHARACTERS:   # this version plays one character: the others are not loaded (or shipped)
+		_char_scenes.append(load(c["file"]) if c["id"] == GameConfig.PLAYABLE else null)
 	if not demo:
 		await _warm_up()
 	enter_start()   # one click (Start) from the game
+	if packs.needed and not _model_ready(_continue_floor()):
+		packs.fetch()   # a player coming back on a later floor: that apartment is in the extra pack
 	if OS.has_feature("web"):   # the page's loader (html/head_include) stays until the start page is there
 		JavaScriptBridge.eval("if (window.ecReady) { window.ecReady(); }", true)
 	for arg in args:
@@ -531,6 +540,8 @@ func _warm_up() -> void:
 		a.set_on(true, 0.0)
 	var extra: Array[Node3D] = []
 	for i in _char_scenes.size():
+		if _char_scenes[i] == null:
+			continue
 		var inst := (_char_scenes[i] as PackedScene).instantiate() as Node3D
 		add_child(inst)
 		inst.position = spawn_pos + Vector3(0.8 * (i + 1), 0.0, 0.0)
@@ -707,10 +718,15 @@ func start_floor(idx: int) -> void:
 	state = State.BUSY
 	floor_idx = idx
 	save.set_next_floor(idx)    # coming back later: this floor
-	_controls = _controls_due()
+	_controls = _controls_due() and not _video   # (trailer recordings: no key hints over the gameplay)
 	if idx == 0:
 		run_passed_wh = 0.0
 	await hud.fade_to(1.0, 0.3)
+	if not await _wait_model(idx):   # the CrazyGames build: the apartment is in the extra pack, not there yet
+		await hud.fade_to(0.0, 0.3)
+		enter_start()
+		hud.toast("No connection: the next floor could not be loaded. Try again.")
+		return
 	_use_apartment(idx)   # this floor's apartment, while the screen is dark
 	_route_table()        # (routes between its appliances: for the last seconds of the round)
 	_set_lift_number(idx + 1)
@@ -745,6 +761,46 @@ func start_floor(idx: int) -> void:
 	state = State.COUNTDOWN
 	if crazy:
 		crazy.gameplay_start()
+	packs.fetch()   # the rest of the game, in the background once the first round is under way
+
+
+func _model_path(idx: int) -> String:
+	return GameConfig.APARTMENT_DIR + "floor%s.glb" % GameConfig.floor_cfg(idx).get("model", "1")
+
+
+func _model_ready(idx: int) -> bool:
+	return ResourceLoader.exists(_model_path(idx))
+
+
+func _wait_model(idx: int) -> bool:
+	## Floor idx's apartment can be built: at once, or after the extra pack has arrived ("Loading… n %" meanwhile).
+	if _model_ready(idx):
+		return true
+	if _loading_lbl == null:
+		var layer := CanvasLayer.new()
+		layer.layer = 103   # over the fade (hud.gd: 102)
+		add_child(layer)
+		_loading_lbl = Label.new()
+		_loading_lbl.set_anchors_preset(Control.PRESET_FULL_RECT)
+		_loading_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		_loading_lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		_loading_lbl.add_theme_font_override("font", load("res://assets/fonts/PixelifySansUA.ttf"))
+		_loading_lbl.add_theme_font_size_override("font_size", 40)
+		_loading_lbl.add_theme_color_override("font_color", Color.WHITE)
+		layer.add_child(_loading_lbl)
+	_loading_lbl.visible = true
+	var tick := func() -> void:
+		_loading_lbl.text = "Loading… %d %%" % roundi(packs.progress * 100.0)
+	tick.call()
+	var timer := Timer.new()
+	timer.wait_time = 0.1
+	timer.autostart = true
+	timer.timeout.connect(tick)
+	add_child(timer)
+	var ok: bool = await packs.ensure(_model_path(idx))
+	timer.queue_free()
+	_loading_lbl.visible = false
+	return ok
 
 
 func _reset_appliances() -> void:
@@ -1273,15 +1329,21 @@ func _run_fx_shots(dir: String) -> void:
 
 func _run_floor_shots(dir: String) -> void:
 	## Every floor's apartment: in play (start of the round, a few appliances on) and seen whole from above.
+	## --clean: the rooms alone (no character, no appliances on, no HUD).
 	_auto_shots = dir
+	var clean := OS.get_cmdline_user_args().has("--clean")
 	await get_tree().create_timer(0.5).timeout
 	for f in range(_floor_from, _floor_to if _floor_to > 0 else GameConfig.FLOORS.size()):
 		await start_floor(f)
 		state = State.BUSY
 		hud.big("")
-		for a in apps:
-			if a.id in ["tv", "floor_lamp", "kettle", "computer", "bed_lamp", "mirror_light", "heater", "washer"]:
-				a.set_on(true, 0.0)
+		if clean:
+			player.visible = false
+			hud.visible = false
+		else:
+			for a in apps:
+				if a.id in ["tv", "floor_lamp", "kettle", "computer", "bed_lamp", "mirror_light", "heater", "washer"]:
+					a.set_on(true, 0.0)
 		player.input_enabled = false
 		await get_tree().create_timer(0.8).timeout
 		await _shot("floor_%02d_play" % (f + 1))
@@ -1294,7 +1356,7 @@ func _run_floor_shots(dir: String) -> void:
 		rig._apply_frame()
 		await get_tree().create_timer(0.3).timeout
 		await _shot("floor_%02d_whole" % (f + 1))
-		hud.visible = true
+		hud.visible = not clean
 		rig.target = player
 	get_tree().quit()
 
@@ -1772,7 +1834,9 @@ func _run_autotest() -> void:
 	print("AUTOTEST start; appliances=", apps.size())
 	await get_tree().create_timer(0.5).timeout
 	await _shot("01_start")
-	for ci in GameConfig.CHARACTERS.size():   # every character still loads (for later updates)
+	for ci in GameConfig.CHARACTERS.size():   # every character still loads (for later updates) where it is shipped
+		if not ResourceLoader.exists(GameConfig.CHARACTERS[ci]["file"]):
+			continue   # the web builds ship only the playable one
 		player.setup(GameConfig.CHARACTERS[ci])
 		await get_tree().process_frame
 	char_idx = clampi(_bot_char, 0, GameConfig.CHARACTERS.size() - 1) if _bot_char >= 0 else _playable()
